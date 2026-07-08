@@ -8,7 +8,7 @@
 -------------------------
 
 local CONFIG = {
-    outputTarget = "bottom", -- side of the chest/rack next to the ME Bridge
+    outputTarget = "bottom",
     scanSeconds = 30,
     requestCooldownSeconds = 120,
     craftCooldownSeconds = 300,
@@ -30,8 +30,11 @@ local CONFIG = {
     splashFooter = "AE2 Auto-Supply Command Center",
 
     monitorScale = 0.5,
-    mainMonitorName = nil,    -- optional: set to "monitor_0" if auto-pick chooses wrong
-    controlMonitorName = nil, -- optional: set to "monitor_1" if auto-pick chooses wrong
+
+    -- Leave these nil for auto-detect.
+    -- Largest monitor = dashboard, smaller monitor = control panel.
+    mainMonitorName = nil,
+    controlMonitorName = nil,
 
     settingsFile = "htp_settings.cfg",
     whitelistFile = "htp_whitelist.txt",
@@ -50,20 +53,14 @@ local CONFIG = {
 -------------------------
 
 local nativeTerm = term.current()
-
 local bridge = peripheral.find("me_bridge") or peripheral.find("meBridge")
 local colony = peripheral.find("colony_integrator") or peripheral.find("colonyIntegrator")
 
-if not bridge then
-    error("No ME Bridge found. Add/connect an Advanced Peripherals ME Bridge.")
-end
-
-if not colony then
-    error("No Colony Integrator found. Add/connect an Advanced Peripherals Colony Integrator inside your colony.")
-end
+if not bridge then error("No ME Bridge found. Add/connect an Advanced Peripherals ME Bridge.") end
+if not colony then error("No Colony Integrator found. Add/connect a Colony Integrator inside your colony.") end
 
 -------------------------
--- BASIC HELPERS
+-- HELPERS
 -------------------------
 
 local function safe(fn, fallback)
@@ -83,13 +80,6 @@ end
 
 local function lower(value)
     return string.lower(tostring(value or ""))
-end
-
-local function clamp(n, min, max)
-    n = tonumber(n) or min
-    if n < min then return min end
-    if n > max then return max end
-    return n
 end
 
 local function trimText(text, maxLen)
@@ -141,11 +131,13 @@ local function readLines(path, limit)
         table.insert(lines, line)
     end
     f.close()
+
     if limit and #lines > limit then
-        local trimmed = {}
-        for i = math.max(1, #lines - limit + 1), #lines do table.insert(trimmed, lines[i]) end
-        return trimmed
+        local out = {}
+        for i = math.max(1, #lines - limit + 1), #lines do table.insert(out, lines[i]) end
+        return out
     end
+
     return lines
 end
 
@@ -163,9 +155,7 @@ local function saveSet(path, set)
     local f = fs.open(path, "w")
     if not f then return end
     local list = {}
-    for key, value in pairs(set) do
-        if value == true then table.insert(list, key) end
-    end
+    for key, value in pairs(set) do if value == true then table.insert(list, key) end end
     table.sort(list)
     for _, item in ipairs(list) do f.writeLine(item) end
     f.close()
@@ -191,21 +181,29 @@ local function saveSettings(settings)
 end
 
 -------------------------
--- SCREEN HELPERS
+-- MONITORS / UI HELPERS
 -------------------------
 
 local MAIN = { name = "terminal", object = nativeTerm, w = 51, h = 19, area = 0 }
 local CONTROL = nil
 local BUTTONS = {}
 
+local function getMonitorSize(mon)
+    local ok, w, h = pcall(function() return mon.getSize() end)
+    if ok and type(w) == "number" and type(h) == "number" then return w, h end
+    return nil, nil
+end
+
 local function initMonitors()
     local monitors = {}
+
     for _, name in ipairs(peripheral.getNames()) do
-        if peripheral.getType(name) == "monitor" then
+        local pType = peripheral.getType(name)
+        if pType == "monitor" then
             local m = peripheral.wrap(name)
             pcall(function() m.setTextScale(CONFIG.monitorScale) end)
-            local w, h = safe(function() return m.getSize() end, 0)
-            if type(w) == "number" and type(h) == "number" then
+            local w, h = getMonitorSize(m)
+            if w and h then
                 table.insert(monitors, { name = name, object = m, w = w, h = h, area = w * h })
             end
         end
@@ -286,7 +284,7 @@ local function drawBox(x, y, width, height, title, color)
 end
 
 local function drawProgressBar(x, y, width, percent, color)
-    percent = clamp(percent, 0, 100)
+    percent = math.max(0, math.min(100, tonumber(percent) or 0))
     width = math.max(6, tonumber(width) or 6)
     local filled = math.floor((percent / 100) * width)
     writeAt(x, y, "[", colors.gray)
@@ -297,18 +295,17 @@ local function drawProgressBar(x, y, width, percent, color)
 end
 
 local function addButton(screenName, x, y, width, height, label, action, color)
+    width = math.max(4, width)
     table.insert(BUTTONS, { screen = screenName, x1 = x, y1 = y, x2 = x + width - 1, y2 = y + height - 1, action = action, label = label })
     color = color or colors.gray
-    for row = 0, height - 1 do
-        writeAt(x, y + row, string.rep(" ", width), colors.white, color)
-    end
+    for row = 0, height - 1 do writeAt(x, y + row, string.rep(" ", width), colors.white, color) end
     local tx = x + math.max(0, math.floor((width - #label) / 2))
     local ty = y + math.floor(height / 2)
     writeAt(tx, ty, label, colors.black, color)
 end
 
 -------------------------
--- STATE / FILES
+-- STATE
 -------------------------
 
 local SETTINGS = loadSettings()
@@ -336,7 +333,7 @@ local STATE = {
     stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0 },
     colonyName = "Unknown Colony",
     status = { citizens = "?", maxCitizens = "?", happiness = "?", underAttack = false, active = nil, constructionSites = "?", graves = "?" },
-    lastError = nil
+    nextScanNow = false
 }
 
 local function saveModeAndPage()
@@ -367,10 +364,10 @@ local function setPage(page)
 end
 
 -------------------------
--- STARTUP SPLASH
+-- BOOT SPLASH
 -------------------------
 
-local function drawBootOnCurrent(percent, step)
+local function drawBoot(percent, step)
     clearScreen()
     local w, h = term.getSize()
     local startY = math.max(2, math.floor(h / 2) - 7)
@@ -405,22 +402,14 @@ local function bootSplash()
     for tick = 1, totalTicks do
         local percent = math.floor((tick / totalTicks) * 100)
         local stepIndex = math.min(#steps, math.max(1, math.ceil((percent / 100) * #steps)))
-        withScreen(MAIN, function() drawBootOnCurrent(percent, steps[stepIndex]) end)
-        if CONTROL then
-            withScreen(CONTROL, function()
-                clearScreen()
-                centerAt(2, "HTP CONTROL", colors.lime)
-                centerAt(4, steps[stepIndex], colors.yellow)
-                drawProgressBar(3, 6, math.max(8, select(1, term.getSize()) - 8), percent, colors.lime)
-                centerAt(8, tostring(percent) .. "%", colors.white)
-            end)
-        end
+        withScreen(MAIN, function() drawBoot(percent, steps[stepIndex]) end)
+        if CONTROL then withScreen(CONTROL, function() drawBoot(percent, "Control Panel: " .. steps[stepIndex]) end) end
         sleep(0.1)
     end
 end
 
 -------------------------
--- AE2 HELPERS
+-- AE2
 -------------------------
 
 local function getAEItem(itemName)
@@ -436,12 +425,8 @@ local function getAECount(itemName)
 end
 
 local function isAEItemCrafting(itemName)
-    if hasMethod(bridge, "isCrafting") then
-        if safe(function() return bridge.isCrafting({ name = itemName }) end, false) == true then return true end
-    end
-    if hasMethod(bridge, "isItemCrafting") then
-        if safe(function() return bridge.isItemCrafting({ name = itemName }) end, false) == true then return true end
-    end
+    if hasMethod(bridge, "isCrafting") and safe(function() return bridge.isCrafting({ name = itemName }) end, false) == true then return true end
+    if hasMethod(bridge, "isItemCrafting") and safe(function() return bridge.isItemCrafting({ name = itemName }) end, false) == true then return true end
     return false
 end
 
@@ -458,7 +443,7 @@ local function exportAEItem(itemName, amount)
     elseif hasMethod(bridge, "exportItemToPeripheral") then
         result, err = safe(function() return bridge.exportItemToPeripheral({ name = itemName, count = amount }, CONFIG.outputTarget) end, nil)
     else
-        return 0, "ME Bridge has no exportItem/exportItemToPeripheral method"
+        return 0, "ME Bridge has no export method"
     end
 
     if type(result) == "number" then return result, nil end
@@ -475,13 +460,8 @@ local function exportAEItem(itemName, amount)
 end
 
 local recentCrafts = {}
-
 local function craftKey(itemName, amount) return tostring(itemName) .. "|" .. tostring(amount) end
-
-local function craftOnCooldown(key)
-    local last = recentCrafts[key]
-    return last and (nowSeconds() - last < CONFIG.craftCooldownSeconds)
-end
+local function craftOnCooldown(key) local last = recentCrafts[key]; return last and (nowSeconds() - last < CONFIG.craftCooldownSeconds) end
 
 local function requestAECraft(itemName, amount)
     if not CONFIG.autoCraft then return false, "autocraft disabled" end
@@ -501,7 +481,7 @@ local function requestAECraft(itemName, amount)
 end
 
 -------------------------
--- MINECOLONIES REQUEST PARSING
+-- MINECOLONIES PARSING
 -------------------------
 
 local genericSkipWords = {
@@ -530,6 +510,7 @@ local function findFirstItemTable(req)
     if type(req.item) == "table" then table.insert(candidates, req.item) end
     if type(req.stack) == "table" then table.insert(candidates, req.stack) end
     if type(req.requestedItem) == "table" then table.insert(candidates, req.requestedItem) end
+
     for _, item in ipairs(candidates) do
         if type(item) == "table" then
             local name = item.name or item.item or item.id or item.itemName
@@ -555,11 +536,10 @@ local function parseRequest(req)
     if not item then return nil, "no item table" end
     local itemName = item.name or item.item or item.id or item.itemName
     if type(itemName) ~= "string" or itemName == "" or itemName == "minecraft:air" then return nil, "bad item name" end
-    local amount = getRequestAmount(req, item)
     return {
         item = item,
         itemName = itemName,
-        amount = amount,
+        amount = getRequestAmount(req, item),
         displayName = req.name or req.desc or req.description or item.displayName or itemName,
         target = req.target or req.building or req.resolver or "Unknown target",
         id = req.id or req.token or req.name or req.desc or itemName
@@ -585,7 +565,7 @@ local function shouldSkipRequest(req, parsed)
 end
 
 -------------------------
--- COLONY HELPERS
+-- COLONY
 -------------------------
 
 local function getColonyName()
@@ -616,19 +596,9 @@ end
 -------------------------
 
 local recentExports = {}
-
-local function requestKey(parsed)
-    return tostring(parsed.id) .. "|" .. tostring(parsed.itemName) .. "|" .. tostring(parsed.amount)
-end
-
-local function exportOnCooldown(key)
-    local last = recentExports[key]
-    return last and (nowSeconds() - last < CONFIG.requestCooldownSeconds)
-end
-
-local function markExported(key)
-    recentExports[key] = nowSeconds()
-end
+local function requestKey(parsed) return tostring(parsed.id) .. "|" .. tostring(parsed.itemName) .. "|" .. tostring(parsed.amount) end
+local function exportOnCooldown(key) local last = recentExports[key]; return last and (nowSeconds() - last < CONFIG.requestCooldownSeconds) end
+local function markExported(key) recentExports[key] = nowSeconds() end
 
 local function addPending(newPending, newOrder, key, parsed)
     newPending[key] = { parsed = parsed, time = nowSeconds() }
@@ -674,7 +644,7 @@ local function denyNext(blacklist)
 end
 
 -------------------------
--- DASHBOARD DRAWING
+-- DRAWING
 -------------------------
 
 local function drawHeader(countdown)
@@ -682,36 +652,9 @@ local function drawHeader(countdown)
     local flash = STATE.status.underAttack and (nowSeconds() % 2 == 0)
     local lineColor = flash and colors.red or colors.gray
     fillAt(1, 1, w, "=", lineColor)
-    if STATE.status.underAttack then
-        centerAt(1, " !!! COLONY UNDER ATTACK !!! ", colors.red)
-    else
-        centerAt(1, " HackThePlanet Colony Supply ", colors.lime)
-    end
+    if STATE.status.underAttack then centerAt(1, " !!! COLONY UNDER ATTACK !!! ", colors.red) else centerAt(1, " HackThePlanet Colony Supply ", colors.lime) end
     centerAt(2, "AE2 -> MineColonies Auto-Supply | Next Scan: " .. tostring(countdown) .. "s", colors.cyan)
     fillAt(1, 3, w, "=", lineColor)
-end
-
-local function drawSmallDashboard(countdown)
-    clearScreen()
-    drawHeader(countdown)
-    local status = STATE.status
-    writeAt(1, 4, "Colony: " .. STATE.colonyName, colors.yellow)
-    if status.underAttack then writeAt(1, 5, "Status: UNDER ATTACK", colors.red) else writeAt(1, 5, "Status: Safe", colors.lime) end
-    writeAt(1, 6, "Mode: " .. STATE.mode, colors.yellow)
-    writeAt(1, 7, "Citizens: " .. tostring(status.citizens) .. " / " .. tostring(status.maxCitizens), colors.white)
-    writeAt(1, 8, "Happiness: " .. formatNumber(status.happiness, 2), colors.white)
-    writeAt(1, 9, "Output: ME Bridge/" .. CONFIG.outputTarget, colors.gray)
-    writeAt(1, 10, "Page: " .. STATE.page, colors.gray)
-    local y = 12
-    for _, row in ipairs(STATE.requestRows) do
-        writeAt(1, y, row.text, row.color)
-        y = y + 1
-        if y > select(2, term.getSize()) - 5 then break end
-    end
-    local h = select(2, term.getSize())
-    writeAt(1, h - 3, "Req: " .. STATE.stats.total .. " Sent: " .. STATE.stats.sent .. " Craft: " .. STATE.stats.crafting, colors.white)
-    writeAt(1, h - 2, "Wait: " .. STATE.stats.waiting .. " Manual: " .. STATE.stats.skipped, colors.gray)
-    writeAt(1, h - 1, "Missing: " .. STATE.stats.missing .. " Bad: " .. STATE.stats.bad, colors.red)
 end
 
 local function drawRequestRows(x, y, width, height, rows)
@@ -726,6 +669,24 @@ local function drawRequestRows(x, y, width, height, rows)
     end
 end
 
+local function drawSmallDashboard(countdown)
+    clearScreen()
+    drawHeader(countdown)
+    local s = STATE.status
+    writeAt(1, 4, "Colony: " .. STATE.colonyName, colors.yellow)
+    writeAt(1, 5, "Status: " .. (s.underAttack and "UNDER ATTACK" or "Safe"), s.underAttack and colors.red or colors.lime)
+    writeAt(1, 6, "Mode: " .. STATE.mode, colors.yellow)
+    writeAt(1, 7, "Citizens: " .. tostring(s.citizens) .. " / " .. tostring(s.maxCitizens), colors.white)
+    writeAt(1, 8, "Happiness: " .. formatNumber(s.happiness, 2), colors.white)
+    writeAt(1, 9, "Output: ME Bridge/" .. CONFIG.outputTarget, colors.gray)
+    writeAt(1, 10, "Page: " .. STATE.page, colors.gray)
+    drawRequestRows(1, 12, select(1, term.getSize()), select(2, term.getSize()) - 16, STATE.requestRows)
+    local h = select(2, term.getSize())
+    writeAt(1, h - 3, "Req: " .. STATE.stats.total .. " Sent: " .. STATE.stats.sent .. " Craft: " .. STATE.stats.crafting, colors.white)
+    writeAt(1, h - 2, "Wait: " .. STATE.stats.waiting .. " Manual: " .. STATE.stats.skipped, colors.gray)
+    writeAt(1, h - 1, "Missing: " .. STATE.stats.missing .. " Bad: " .. STATE.stats.bad, colors.red)
+end
+
 local function drawDashboardPage(countdown)
     local w, h = term.getSize()
     local leftW = math.max(28, math.floor(w * 0.52))
@@ -734,7 +695,6 @@ local function drawDashboardPage(countdown)
 
     clearScreen()
     drawHeader(countdown)
-
     local boxColor = STATE.status.underAttack and colors.red or colors.gray
     drawBox(1, 5, leftW, 9, " Colony Status ", boxColor)
     drawBox(leftW + 2, 5, rightW, 9, " System Status ", boxColor)
@@ -744,8 +704,7 @@ local function drawDashboardPage(countdown)
     writeAt(3, 7, "Status:", colors.yellow); writeAt(12, 7, s.underAttack and "UNDER ATTACK" or "Safe", s.underAttack and colors.red or colors.lime)
     writeAt(3, 8, "Citizens:", colors.yellow); writeAt(13, 8, tostring(s.citizens) .. " / " .. tostring(s.maxCitizens), colors.white)
     writeAt(3, 9, "Happy:", colors.yellow); writeAt(11, 9, formatNumber(s.happiness, 2), colors.white)
-    writeAt(3, 10, "Active:", colors.yellow)
-    writeAt(11, 10, s.active == nil and "Unknown" or (s.active and "Yes" or "No"), s.active == true and colors.lime or colors.gray)
+    writeAt(3, 10, "Active:", colors.yellow); writeAt(11, 10, s.active == nil and "Unknown" or (s.active and "Yes" or "No"), s.active == true and colors.lime or colors.gray)
     writeAt(3, 11, "Builds:", colors.yellow); writeAt(11, 11, tostring(s.constructionSites), colors.white)
     writeAt(3, 12, "Graves:", colors.yellow); writeAt(11, 12, tostring(s.graves), colors.white)
 
@@ -779,7 +738,7 @@ local function drawRequestsPage(countdown)
     clearScreen(); drawHeader(countdown)
     local w, h = term.getSize()
     drawBox(1, 5, w, h - 5, " Request Details ", colors.gray)
-    writeAt(3, 6, "Mode: " .. STATE.mode .. " | Pending: " .. tostring(#STATE.pendingOrder) .. " | Page controlled from small monitor", colors.yellow)
+    writeAt(3, 6, "Mode: " .. STATE.mode .. " | Pending: " .. tostring(#STATE.pendingOrder) .. " | Control from small monitor", colors.yellow)
     drawRequestRows(3, 8, w - 4, h - 9, STATE.requestRows)
 end
 
@@ -787,10 +746,7 @@ local function drawPendingPage(countdown)
     clearScreen(); drawHeader(countdown)
     local w, h = term.getSize()
     drawBox(1, 5, w, h - 5, " Pending Approval ", colors.gray)
-    if #STATE.pendingOrder == 0 then
-        centerAt(8, "No pending approvals.", colors.lime)
-        return
-    end
+    if #STATE.pendingOrder == 0 then centerAt(8, "No pending approvals.", colors.lime); return end
     local y = 7
     for i, key in ipairs(STATE.pendingOrder) do
         local p = STATE.pending[key]
@@ -818,22 +774,19 @@ local function drawSettingsPage(countdown)
     clearScreen(); drawHeader(countdown)
     local w, h = term.getSize()
     drawBox(1, 5, w, h - 5, " Settings / Rules ", colors.gray)
-    local whitelistCount = 0
-    local blacklistCount = 0
+    local whitelistCount, blacklistCount = 0, 0
     for _ in pairs(WHITELIST) do whitelistCount = whitelistCount + 1 end
     for _ in pairs(BLACKLIST) do blacklistCount = blacklistCount + 1 end
     writeAt(3, 7, "Mode: " .. STATE.mode, colors.yellow)
     writeAt(3, 8, "Output Target: " .. CONFIG.outputTarget, colors.white)
     writeAt(3, 9, "Whitelist Items: " .. tostring(whitelistCount), colors.lime)
     writeAt(3, 10, "Blacklist Items: " .. tostring(blacklistCount), colors.red)
-    writeAt(3, 12, "Modes:", colors.yellow)
-    writeAt(5, 13, "AUTO      = safe requests send unless blacklisted", colors.white)
-    writeAt(5, 14, "APPROVAL  = requests wait for your button approval", colors.white)
-    writeAt(5, 15, "WHITELIST = only saved approved items send automatically", colors.white)
+    writeAt(3, 12, "AUTO      = safe requests send unless blacklisted", colors.white)
+    writeAt(3, 13, "APPROVAL  = requests wait for approval", colors.white)
+    writeAt(3, 14, "WHITELIST = only ALWAYS-approved items send", colors.white)
 end
 
 local function drawMain(countdown)
-    countdown = math.max(0, tonumber(countdown) or 0)
     withScreen(MAIN, function()
         if STATE.page == "REQUESTS" then drawRequestsPage(countdown)
         elseif STATE.page == "PENDING" then drawPendingPage(countdown)
@@ -844,8 +797,7 @@ local function drawMain(countdown)
 end
 
 local function drawControlButton(x, y, w, label, action, active)
-    local color = active and colors.lime or colors.gray
-    addButton(CONTROL.name, x, y, w, 3, label, action, color)
+    addButton(CONTROL.name, x, y, w, 3, label, action, active and colors.lime or colors.gray)
 end
 
 local function drawControl(countdown)
@@ -858,6 +810,7 @@ local function drawControl(countdown)
         fillAt(1, 3, w, "=", STATE.status.underAttack and colors.red or colors.gray)
 
         local colW = math.floor((w - 4) / 3)
+        if colW < 6 then colW = 6 end
         drawControlButton(2, 5, colW, "AUTO", function() setMode("AUTO") end, STATE.mode == "AUTO")
         drawControlButton(3 + colW, 5, colW, "APPROVAL", function() setMode("APPROVAL") end, STATE.mode == "APPROVAL")
         drawControlButton(4 + colW * 2, 5, colW, "WHITE", function() setMode("WHITELIST") end, STATE.mode == "WHITELIST")
@@ -872,7 +825,7 @@ local function drawControl(countdown)
 
         local y = 18
         local key, pending = firstPending()
-        if pending then
+        if pending and y + 7 <= h then
             writeAt(2, y - 1, "Pending: " .. trimText(pending.parsed.amount .. "x " .. pending.parsed.itemName, w - 11), colors.yellow)
             local half = math.floor((w - 5) / 2)
             addButton(CONTROL.name, 2, y, half, 3, "APPROVE", function() approveNext(false); STATE.nextScanNow = true end, colors.lime)
@@ -880,25 +833,30 @@ local function drawControl(countdown)
             addButton(CONTROL.name, 2, y + 4, half, 3, "DENY", function() denyNext(false); STATE.nextScanNow = true end, colors.orange)
             addButton(CONTROL.name, 3 + half, y + 4, half, 3, "BLACKLIST", function() denyNext(true); STATE.nextScanNow = true end, colors.red)
         else
-            centerAt(y, "No pending approvals", colors.gray)
+            centerAt(math.min(y, h - 2), "No pending approvals", colors.gray)
         end
 
-        if STATE.status.underAttack then
-            centerAt(h - 1, "!!! COLONY UNDER ATTACK !!!", colors.red)
-        else
-            centerAt(h - 1, "AE2 LINKED | COLONY LINKED", colors.gray)
-        end
+        if STATE.status.underAttack then centerAt(h - 1, "!!! COLONY UNDER ATTACK !!!", colors.red) else centerAt(h - 1, "AE2 LINKED | COLONY LINKED", colors.gray) end
     end)
 end
 
 local function renderAll(countdown)
     BUTTONS = {}
-    drawMain(countdown)
-    drawControl(countdown)
+    local ok, err = pcall(function()
+        drawMain(countdown)
+        drawControl(countdown)
+    end)
+    if not ok then
+        term.redirect(nativeTerm)
+        clearScreen()
+        print("Render error:")
+        print(err)
+        logError("Render error: " .. tostring(err))
+    end
 end
 
 -------------------------
--- MAIN SCAN
+-- SCAN
 -------------------------
 
 local function addRequestRow(rows, text, color)
@@ -974,7 +932,6 @@ local function performScan()
     STATE.scans = STATE.scans + 1
     STATE.colonyName = getColonyName()
     STATE.status = getColonyStatus()
-    STATE.lastError = nil
 
     local stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0 }
     local rows = {}
@@ -986,7 +943,6 @@ local function performScan()
         stats.bad = 1
         addRequestRow(rows, "[ERROR] Could not read MineColonies requests.", colors.red)
         addRequestRow(rows, trimText(tostring(err), 60), colors.red)
-        STATE.lastError = tostring(err)
         logError("getRequests failed: " .. tostring(err))
         addAction("getRequests failed")
         STATE.stats = stats
@@ -1036,7 +992,7 @@ local function performScan()
 end
 
 -------------------------
--- TOUCH HANDLING
+-- TOUCH
 -------------------------
 
 local function handleTouch(screenName, x, y)
@@ -1056,6 +1012,13 @@ end
 
 initMonitors()
 bootSplash()
+
+term.redirect(nativeTerm)
+clearScreen()
+print("HTP Colony Supply running.")
+print("Main: " .. tostring(MAIN.name) .. " " .. tostring(MAIN.w) .. "x" .. tostring(MAIN.h))
+print("Control: " .. tostring(CONTROL and CONTROL.name or "none"))
+
 logInfo("HackThePlanet Colony Supply started.")
 logInfo("Output target: " .. tostring(CONFIG.outputTarget))
 logInfo("Main monitor: " .. tostring(MAIN.name) .. " Control monitor: " .. tostring(CONTROL and CONTROL.name or "none"))
@@ -1079,15 +1042,10 @@ while true do
         renderAll(math.max(0, nextScanAt - nowSeconds()))
     end
 
-    if event[1] == "timer" and event[2] == timer then
-        -- normal one-second tick
-    end
-
     if STATE.nextScanNow or nowSeconds() >= nextScanAt then
         STATE.nextScanNow = false
         local scanOk, scanErr = pcall(performScan)
         if not scanOk then
-            STATE.lastError = tostring(scanErr)
             logError("Main loop scan error: " .. tostring(scanErr))
             addAction("Scan error")
         end
