@@ -10,7 +10,7 @@
 local CONFIG = {
     -- Side of the output chest/rack/container relative to the ME Bridge.
     -- Valid sides: "left", "right", "front", "back", "top", "bottom"
-    outputTarget = "left",
+    outputTarget = "bottom",
 
     -- Scan speed.
     scanSeconds = 30,
