@@ -67,9 +67,60 @@ local function fmtStat(v)
     return string.format("%.2f", n)
 end
 
+local function titleCase(v)
+    v = text(v)
+    v = v:gsub("_", " "):gsub("%-", " ")
+    return (v:gsub("(%a)([%w_']*)", function(a, b) return string.upper(a) .. string.lower(b) end))
+end
+
 local function labelValue(v)
     if type(v) ~= "table" then return text(v) end
     return text(v.name or v.displayName or v.type or v.buildingName or v.id or "Assigned")
+end
+
+local function cleanJobName(v)
+    local raw = labelValue(v)
+    local l = lower(raw)
+    local known = {
+        { "builder", "Builder" },
+        { "miner", "Miner" },
+        { "farmer", "Farmer" },
+        { "guard", "Guard" },
+        { "courier", "Courier" },
+        { "cook", "Cook" },
+        { "restaurant", "Cook" },
+        { "lumberjack", "Lumberjack" },
+        { "forester", "Forester" },
+        { "fisher", "Fisher" },
+        { "rancher", "Rancher" },
+        { "shepherd", "Shepherd" },
+        { "chicken", "Chicken Herder" },
+        { "cowboy", "Cowhand" },
+        { "swine", "Swineherd" },
+        { "composter", "Composter" },
+        { "sifter", "Sifter" },
+        { "baker", "Baker" },
+        { "sawmill", "Sawmill" },
+        { "crusher", "Crusher" },
+        { "stonemason", "Stonemason" },
+        { "blacksmith", "Blacksmith" },
+        { "mechanic", "Mechanic" },
+        { "enchanter", "Enchanter" },
+        { "florist", "Florist" },
+        { "student", "Student" },
+        { "teacher", "Teacher" },
+        { "visitor", "Visitor" },
+        { "citizen", "Citizen" }
+    }
+    for _, pair in ipairs(known) do
+        if string.find(l, pair[1], 1, true) then return pair[2] end
+    end
+    raw = raw:gsub("^.*%.", "")
+    raw = raw:gsub("^.*:", "")
+    raw = raw:gsub("^Building", "")
+    raw = raw:gsub("^building", "")
+    if raw == "" then return "Worker" end
+    return titleCase(raw)
 end
 
 local function fmtTime(seconds)
@@ -488,6 +539,22 @@ local function workOrderRows()
     return rows
 end
 
+local function citizenColor(hp, maxHp, food, happy, state)
+    local flash = now() % 2 == 0
+    local stateText = lower(state)
+    local nHp = tonumber(hp)
+    local nMax = tonumber(maxHp)
+    local nFood = tonumber(food)
+    local nHappy = tonumber(happy)
+    if nHp and ((nMax and nMax > 0 and nHp / nMax <= 0.35) or nHp <= 7) then return flash and colors.red or colors.orange end
+    if nFood and nFood < 5 then return flash and colors.red or colors.orange end
+    if nHappy and nHappy < 1 then return flash and colors.red or colors.orange end
+    if nFood and nFood < 10 then return colors.orange end
+    if nHappy and nHappy < 1.5 then return colors.orange end
+    if string.find(stateText, "sleep", 1, true) then return colors.lightBlue end
+    return colors.white
+end
+
 local function citizenRows()
     local rows = {}
     for _, method in ipairs({ "getCitizens", "getAllCitizens" }) do
@@ -504,15 +571,20 @@ local function citizenRows()
                         local food = citizen.saturation or citizen.food or citizen.hunger
                         local happy = citizen.happiness or citizen.happy
                         local state = citizen.state or citizen.status
+                        local warnings = {}
+                        if tonumber(hp) and ((tonumber(maxHp) and tonumber(maxHp) > 0 and tonumber(hp) / tonumber(maxHp) <= 0.35) or tonumber(hp) <= 7) then table.insert(warnings, "LOW HP") end
+                        if tonumber(food) and tonumber(food) < 10 then table.insert(warnings, "LOW FOOD") end
+                        if tonumber(happy) and tonumber(happy) < 1.5 then table.insert(warnings, "LOW HAPPY") end
                         local line = text(name)
-                        if job then line = line .. " | Job: " .. labelValue(job) end
+                        if job then line = line .. " | Job: " .. cleanJobName(job) end
                         if hp then line = line .. " | HP: " .. fmtStat(hp) .. (maxHp and ("/" .. fmtStat(maxHp)) or "") end
                         if food then line = line .. " | Food: " .. fmtStat(food) end
                         if happy then line = line .. " | Happy: " .. fmtStat(happy) end
                         if state then line = line .. " | " .. labelValue(state) end
-                        table.insert(rows, line)
+                        if #warnings > 0 then line = line .. " | ! " .. table.concat(warnings, ", ") end
+                        table.insert(rows, { text = line, color = citizenColor(hp, maxHp, food, happy, state) })
                     else
-                        table.insert(rows, text(citizen))
+                        table.insert(rows, { text = text(citizen), color = colors.white })
                     end
                     if #rows >= 48 then return rows end
                 end
@@ -781,11 +853,12 @@ end
 
 local function citizensPage(countdown)
     local rows = {}
-    table.insert(rows, "Citizens: " .. text(STATE.status.citizens) .. " / " .. text(STATE.status.maxCitizens) .. " | Colony Happiness: " .. fmtNum(STATE.status.happiness, 2))
-    table.insert(rows, "")
+    table.insert(rows, { text = "Citizens: " .. text(STATE.status.citizens) .. " / " .. text(STATE.status.maxCitizens) .. " | Colony Happiness: " .. fmtNum(STATE.status.happiness, 2), color = colors.yellow })
+    table.insert(rows, { text = "Red flashing = danger | Orange = low | Blue = sleeping", color = colors.gray })
+    table.insert(rows, { text = "", color = colors.white })
     if #STATE.citizenRows == 0 then
-        table.insert(rows, "No detailed citizen list exposed by this Colony Integrator.")
-        table.insert(rows, "Counts/happiness still work on the dashboard.")
+        table.insert(rows, { text = "No detailed citizen list exposed by this Colony Integrator.", color = colors.gray })
+        table.insert(rows, { text = "Counts/happiness still work on the dashboard.", color = colors.gray })
     else
         for _, row in ipairs(STATE.citizenRows) do table.insert(rows, row) end
     end
@@ -797,7 +870,7 @@ local function pendingPage(countdown)
     for i, key in ipairs(STATE.pendingOrder) do
         local pending = STATE.pending[key]
         if pending then
-            table.insert(rows, (i == STATE.selected and "> " or "  ") .. i .. "/" .. #STATE.pendingOrder .. " " .. pending.parsed.amount .. "x " .. pending.parsed.itemName .. " (" .. pending.reason .. ")")
+            table.insert(rows, { text = (i == STATE.selected and "> " or "  ") .. i .. "/" .. #STATE.pendingOrder .. " " .. pending.parsed.amount .. "x " .. pending.parsed.itemName .. " (" .. pending.reason .. ")", color = i == STATE.selected and colors.yellow or colors.white })
         end
     end
     simplePage(countdown, " Pending Approval ", rows, "No pending approvals.")
@@ -808,15 +881,15 @@ local function settingsPage(countdown)
     for _ in pairs(WHITELIST) do wc = wc + 1 end
     for _ in pairs(BLOCKED) do bc = bc + 1 end
     simplePage(countdown, " Settings / Rules ", {
-        "Mode: " .. STATE.mode,
-        "Paused: " .. text(STATE.paused),
-        "Output Target: " .. CONFIG.outputTarget,
-        "Whitelist Items: " .. wc,
-        "Blocked Items: " .. bc,
-        "",
-        "AUTO      = safe requests send unless blocked",
-        "APPROVAL  = requests wait for approval",
-        "WHITELIST = only ALWAYS-approved items send"
+        { text = "Mode: " .. STATE.mode, color = colors.yellow },
+        { text = "Paused: " .. text(STATE.paused), color = STATE.paused and colors.orange or colors.white },
+        { text = "Output Target: " .. CONFIG.outputTarget, color = colors.white },
+        { text = "Whitelist Items: " .. wc, color = colors.lime },
+        { text = "Blocked Items: " .. bc, color = colors.red },
+        { text = "", color = colors.white },
+        { text = "AUTO      = safe requests send unless blocked", color = colors.white },
+        { text = "APPROVAL  = requests wait for approval", color = colors.white },
+        { text = "WHITELIST = only ALWAYS-approved items send", color = colors.white }
     }, "No settings.")
 end
 
