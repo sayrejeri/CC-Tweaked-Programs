@@ -60,6 +60,18 @@ local function fmtNum(v, places)
     return tostring(math.floor(n + 0.5))
 end
 
+local function fmtStat(v)
+    local n = tonumber(v)
+    if not n then return text(v or "?") end
+    if math.abs(n - math.floor(n + 0.00001)) < 0.005 then return tostring(math.floor(n + 0.00001)) end
+    return string.format("%.2f", n)
+end
+
+local function labelValue(v)
+    if type(v) ~= "table" then return text(v) end
+    return text(v.name or v.displayName or v.type or v.buildingName or v.id or "Assigned")
+end
+
 local function fmtTime(seconds)
     seconds = math.max(0, tonumber(seconds) or 0)
     local h = math.floor(seconds / 3600)
@@ -463,7 +475,7 @@ local function workOrderRows()
                         local title = entry.name or entry.displayName or entry.type or entry.workOrderType or entry.buildingName or entry.id or "Work Order"
                         local level = entry.level or entry.targetLevel or entry.buildLevel or entry.currentLevel
                         local state = entry.state or entry.status or entry.priority or entry.claimedBy
-                        table.insert(rows, "[" .. method .. "] " .. text(title) .. (level and (" L" .. text(level)) or "") .. (state and (" - " .. text(state)) or ""))
+                        table.insert(rows, "[" .. method .. "] " .. labelValue(title) .. (level and (" L" .. fmtStat(level)) or "") .. (state and (" - " .. labelValue(state)) or ""))
                     else
                         table.insert(rows, "[" .. method .. "] " .. text(entry))
                     end
@@ -493,11 +505,11 @@ local function citizenRows()
                         local happy = citizen.happiness or citizen.happy
                         local state = citizen.state or citizen.status
                         local line = text(name)
-                        if job then line = line .. " | Job: " .. text(job) end
-                        if hp then line = line .. " | HP: " .. text(hp) .. (maxHp and ("/" .. text(maxHp)) or "") end
-                        if food then line = line .. " | Food: " .. text(food) end
-                        if happy then line = line .. " | Happy: " .. text(happy) end
-                        if state then line = line .. " | " .. text(state) end
+                        if job then line = line .. " | Job: " .. labelValue(job) end
+                        if hp then line = line .. " | HP: " .. fmtStat(hp) .. (maxHp and ("/" .. fmtStat(maxHp)) or "") end
+                        if food then line = line .. " | Food: " .. fmtStat(food) end
+                        if happy then line = line .. " | Happy: " .. fmtStat(happy) end
+                        if state then line = line .. " | " .. labelValue(state) end
                         table.insert(rows, line)
                     else
                         table.insert(rows, text(citizen))
