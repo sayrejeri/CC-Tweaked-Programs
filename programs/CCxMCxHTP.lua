@@ -19,9 +19,9 @@ local CONFIG = {
     skipNBT = true,
     skipGenericRequests = true,
 
-    -- AUTO = safe requests send automatically unless blacklisted
-    -- APPROVAL = safe requests wait for monitor approval
-    -- WHITELIST = only whitelisted items send automatically
+    -- AUTO = safe requests send automatically unless blacklisted/protected
+    -- APPROVAL = requests wait for monitor approval
+    -- WHITELIST = only whitelisted/ALWAYS-approved items send automatically
     defaultMode = "AUTO",
 
     splashSeconds = 15,
@@ -30,22 +30,38 @@ local CONFIG = {
     splashFooter = "AE2 Auto-Supply Command Center",
 
     monitorScale = 0.5,
-
-    -- Leave these nil for auto-detect.
-    -- Largest monitor = dashboard, smaller monitor = control panel.
     mainMonitorName = nil,
     controlMonitorName = nil,
 
     settingsFile = "htp_settings.cfg",
     whitelistFile = "htp_whitelist.txt",
     blacklistFile = "htp_blacklist.txt",
+    protectedFile = "htp_protected.txt",
     logFile = "htp_colony.log",
     errorLogFile = "htp_colony_errors.log",
     historyFile = "htp_history.log",
 
-    maxShownRequests = 8,
+    maxShownRequests = 10,
     maxRecentActions = 6,
-    maxHistoryLines = 12
+    maxHistoryLines = 40,
+    maxBuildRows = 32
+}
+
+local DEFAULT_PROTECTED = {
+    ["minecraft:diamond"] = true,
+    ["minecraft:diamond_block"] = true,
+    ["minecraft:emerald"] = true,
+    ["minecraft:emerald_block"] = true,
+    ["minecraft:netherite_ingot"] = true,
+    ["minecraft:netherite_block"] = true,
+    ["minecraft:nether_star"] = true,
+    ["minecraft:dragon_egg"] = true,
+    ["allthemodium:allthemodium_ingot"] = true,
+    ["allthemodium:allthemodium_block"] = true,
+    ["allthemodium:vibranium_ingot"] = true,
+    ["allthemodium:vibranium_block"] = true,
+    ["allthemodium:unobtainium_ingot"] = true,
+    ["allthemodium:unobtainium_block"] = true
 }
 
 -------------------------
@@ -161,6 +177,13 @@ local function saveSet(path, set)
     f.close()
 end
 
+local function mergeSets(a, b)
+    local out = {}
+    for k, v in pairs(a or {}) do if v then out[k] = true end end
+    for k, v in pairs(b or {}) do if v then out[k] = true end end
+    return out
+end
+
 local function loadSettings()
     local settings = {}
     for _, line in ipairs(readLines(CONFIG.settingsFile)) do
@@ -198,8 +221,7 @@ local function initMonitors()
     local monitors = {}
 
     for _, name in ipairs(peripheral.getNames()) do
-        local pType = peripheral.getType(name)
-        if pType == "monitor" then
+        if peripheral.getType(name) == "monitor" then
             local m = peripheral.wrap(name)
             pcall(function() m.setTextScale(CONFIG.monitorScale) end)
             local w, h = getMonitorSize(m)
@@ -296,6 +318,7 @@ end
 
 local function addButton(screenName, x, y, width, height, label, action, color)
     width = math.max(4, width)
+    height = math.max(1, height)
     table.insert(BUTTONS, { screen = screenName, x1 = x, y1 = y, x2 = x + width - 1, y2 = y + height - 1, action = action, label = label })
     color = color or colors.gray
     for row = 0, height - 1 do writeAt(x, y + row, string.rep(" ", width), colors.white, color) end
@@ -311,10 +334,13 @@ end
 local SETTINGS = loadSettings()
 local WHITELIST = loadSet(CONFIG.whitelistFile)
 local BLACKLIST = loadSet(CONFIG.blacklistFile)
+local PROTECTED = mergeSets(DEFAULT_PROTECTED, loadSet(CONFIG.protectedFile))
 
 local STATE = {
     mode = SETTINGS.mode or CONFIG.defaultMode,
     page = SETTINGS.page or "DASHBOARD",
+    paused = SETTINGS.paused == "true",
+    selectedPending = tonumber(SETTINGS.selectedPending or "1") or 1,
     started = nowSeconds(),
     scans = 0,
     sent = 0,
@@ -330,7 +356,9 @@ local STATE = {
     approvedOnce = {},
     deniedUntil = {},
     requestRows = {},
-    stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0 },
+    buildRows = {},
+    workOrderRows = {},
+    stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 },
     colonyName = "Unknown Colony",
     status = { citizens = "?", maxCitizens = "?", happiness = "?", underAttack = false, active = nil, constructionSites = "?", graves = "?" },
     nextScanNow = false
@@ -339,6 +367,8 @@ local STATE = {
 local function saveModeAndPage()
     SETTINGS.mode = STATE.mode
     SETTINGS.page = STATE.page
+    SETTINGS.paused = tostring(STATE.paused)
+    SETTINGS.selectedPending = tostring(STATE.selectedPending)
     saveSettings(SETTINGS)
 end
 
@@ -361,6 +391,20 @@ local function setPage(page)
     STATE.page = page
     saveModeAndPage()
     addAction("Page: " .. page)
+end
+
+local function setPaused(paused)
+    STATE.paused = paused == true
+    saveModeAndPage()
+    if STATE.paused then addAction("Auto supply paused") else addAction("Auto supply resumed") end
+end
+
+local function clearHistory()
+    local f = fs.open(CONFIG.historyFile, "w")
+    if f then f.close() end
+    STATE.actions = {}
+    STATE.lastAction = "History cleared"
+    logHistory("History cleared")
 end
 
 -------------------------
@@ -392,9 +436,9 @@ local function bootSplash()
         "Checking ME Bridge peripheral...",
         "Checking MineColonies Integrator...",
         "Detecting dual monitors...",
-        "Loading whitelist and blacklist...",
-        "Preparing control panel...",
-        "Finalizing command center UI...",
+        "Loading whitelist / blacklist / protected rules...",
+        "Preparing approval controls...",
+        "Reading building request pages...",
         "System ready."
     }
 
@@ -542,7 +586,8 @@ local function parseRequest(req)
         amount = getRequestAmount(req, item),
         displayName = req.name or req.desc or req.description or item.displayName or itemName,
         target = req.target or req.building or req.resolver or "Unknown target",
-        id = req.id or req.token or req.name or req.desc or itemName
+        id = req.id or req.token or req.name or req.desc or itemName,
+        rawText = requestText(req)
     }, nil
 end
 
@@ -555,7 +600,7 @@ local function shouldSkipRequest(req, parsed)
     end
     if CONFIG.skipGenericRequests then
         for _, word in ipairs(genericSkipWords) do
-            if string.find(text, word, 1, true) then return true, "generic/manual: " .. word end
+            if string.find(text, word, 1, true) then return true, "manual: " .. word end
         end
     end
     for _, word in ipairs(itemNameSkipWords) do
@@ -591,6 +636,37 @@ local function getRequests()
     return requests, nil
 end
 
+local function stringifyWorkOrder(order)
+    if type(order) ~= "table" then return tostring(order) end
+    local title = order.name or order.displayName or order.type or order.workOrderType or order.buildingName or order.structurePack or order.id or "Work Order"
+    local level = order.level or order.targetLevel or order.buildLevel or order.currentLevel
+    local state = order.state or order.status or order.priority or order.claimedBy
+    local out = tostring(title)
+    if level then out = out .. " L" .. tostring(level) end
+    if state then out = out .. " - " .. tostring(state) end
+    return out
+end
+
+local function getWorkOrderRows()
+    local rows = {}
+    local methodNames = { "getWorkOrders", "getWorkorders", "getConstructionSites", "getBuildings" }
+
+    for _, method in ipairs(methodNames) do
+        if hasMethod(colony, method) then
+            local result = safe(function() return colony[method]() end, nil)
+            if type(result) == "table" then
+                for _, order in pairs(result) do
+                    table.insert(rows, "[" .. method .. "] " .. stringifyWorkOrder(order))
+                    if #rows >= 12 then return rows end
+                end
+                if #rows > 0 then return rows end
+            end
+        end
+    end
+
+    return rows
+end
+
 -------------------------
 -- APPROVAL / RULES
 -------------------------
@@ -600,21 +676,26 @@ local function requestKey(parsed) return tostring(parsed.id) .. "|" .. tostring(
 local function exportOnCooldown(key) local last = recentExports[key]; return last and (nowSeconds() - last < CONFIG.requestCooldownSeconds) end
 local function markExported(key) recentExports[key] = nowSeconds() end
 
-local function addPending(newPending, newOrder, key, parsed)
-    newPending[key] = { parsed = parsed, time = nowSeconds() }
+local function addPending(newPending, newOrder, key, parsed, reason)
+    newPending[key] = { parsed = parsed, time = nowSeconds(), reason = reason or "approval" }
     table.insert(newOrder, key)
 end
 
-local function firstPending()
-    for _, key in ipairs(STATE.pendingOrder) do
-        local pending = STATE.pending[key]
-        if pending then return key, pending end
-    end
+local function normalizeSelectedPending()
+    if #STATE.pendingOrder <= 0 then STATE.selectedPending = 1; return end
+    if STATE.selectedPending < 1 then STATE.selectedPending = #STATE.pendingOrder end
+    if STATE.selectedPending > #STATE.pendingOrder then STATE.selectedPending = 1 end
+end
+
+local function selectedPending()
+    normalizeSelectedPending()
+    local key = STATE.pendingOrder[STATE.selectedPending]
+    if key then return key, STATE.pending[key] end
     return nil, nil
 end
 
-local function approveNext(always)
-    local key, pending = firstPending()
+local function approveSelected(always)
+    local key, pending = selectedPending()
     if not pending then addAction("No pending request to approve"); return end
     STATE.approvedOnce[key] = true
     if always then
@@ -628,8 +709,8 @@ local function approveNext(always)
     end
 end
 
-local function denyNext(blacklist)
-    local key, pending = firstPending()
+local function denySelected(blacklist)
+    local key, pending = selectedPending()
     if not pending then addAction("No pending request to deny"); return end
     STATE.deniedUntil[key] = nowSeconds() + CONFIG.denyCooldownSeconds
     if blacklist then
@@ -643,6 +724,13 @@ local function denyNext(blacklist)
     end
 end
 
+local function nextPending(delta)
+    if #STATE.pendingOrder <= 0 then return end
+    STATE.selectedPending = STATE.selectedPending + delta
+    normalizeSelectedPending()
+    saveModeAndPage()
+end
+
 -------------------------
 -- DRAWING
 -------------------------
@@ -653,7 +741,8 @@ local function drawHeader(countdown)
     local lineColor = flash and colors.red or colors.gray
     fillAt(1, 1, w, "=", lineColor)
     if STATE.status.underAttack then centerAt(1, " !!! COLONY UNDER ATTACK !!! ", colors.red) else centerAt(1, " HackThePlanet Colony Supply ", colors.lime) end
-    centerAt(2, "AE2 -> MineColonies Auto-Supply | Next Scan: " .. tostring(countdown) .. "s", colors.cyan)
+    local pausedText = STATE.paused and " | PAUSED" or ""
+    centerAt(2, "AE2 -> MineColonies Auto-Supply" .. pausedText .. " | Next Scan: " .. tostring(countdown) .. "s", STATE.paused and colors.orange or colors.cyan)
     fillAt(1, 3, w, "=", lineColor)
 end
 
@@ -675,15 +764,15 @@ local function drawSmallDashboard(countdown)
     local s = STATE.status
     writeAt(1, 4, "Colony: " .. STATE.colonyName, colors.yellow)
     writeAt(1, 5, "Status: " .. (s.underAttack and "UNDER ATTACK" or "Safe"), s.underAttack and colors.red or colors.lime)
-    writeAt(1, 6, "Mode: " .. STATE.mode, colors.yellow)
+    writeAt(1, 6, "Mode: " .. STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or colors.yellow)
     writeAt(1, 7, "Citizens: " .. tostring(s.citizens) .. " / " .. tostring(s.maxCitizens), colors.white)
     writeAt(1, 8, "Happiness: " .. formatNumber(s.happiness, 2), colors.white)
     writeAt(1, 9, "Output: ME Bridge/" .. CONFIG.outputTarget, colors.gray)
     writeAt(1, 10, "Page: " .. STATE.page, colors.gray)
     drawRequestRows(1, 12, select(1, term.getSize()), select(2, term.getSize()) - 16, STATE.requestRows)
     local h = select(2, term.getSize())
-    writeAt(1, h - 3, "Req: " .. STATE.stats.total .. " Sent: " .. STATE.stats.sent .. " Craft: " .. STATE.stats.crafting, colors.white)
-    writeAt(1, h - 2, "Wait: " .. STATE.stats.waiting .. " Manual: " .. STATE.stats.skipped, colors.gray)
+    writeAt(1, h - 3, "Req: " .. STATE.stats.total .. " Pending: " .. STATE.stats.pending, colors.white)
+    writeAt(1, h - 2, "Sent: " .. STATE.stats.sent .. " Craft: " .. STATE.stats.crafting, colors.green)
     writeAt(1, h - 1, "Missing: " .. STATE.stats.missing .. " Bad: " .. STATE.stats.bad, colors.red)
 end
 
@@ -706,15 +795,15 @@ local function drawDashboardPage(countdown)
     writeAt(3, 9, "Happy:", colors.yellow); writeAt(11, 9, formatNumber(s.happiness, 2), colors.white)
     writeAt(3, 10, "Active:", colors.yellow); writeAt(11, 10, s.active == nil and "Unknown" or (s.active and "Yes" or "No"), s.active == true and colors.lime or colors.gray)
     writeAt(3, 11, "Builds:", colors.yellow); writeAt(11, 11, tostring(s.constructionSites), colors.white)
-    writeAt(3, 12, "Graves:", colors.yellow); writeAt(11, 12, tostring(s.graves), colors.white)
+    writeAt(3, 12, "Graves:", colors.yellow); writeAt(11, 12, tostring(s.graves), tonumber(s.graves) and tonumber(s.graves) > 0 and colors.red or colors.white)
 
     local rx = leftW + 4
-    writeAt(rx, 6, "Mode:", colors.yellow); writeAt(rx + 7, 6, STATE.mode, STATE.mode == "AUTO" and colors.lime or colors.yellow)
+    writeAt(rx, 6, "Mode:", colors.yellow); writeAt(rx + 7, 6, STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or (STATE.mode == "AUTO" and colors.lime or colors.yellow))
     writeAt(rx, 7, "Output:", colors.yellow); writeAt(rx + 9, 7, "ME Bridge/" .. CONFIG.outputTarget, colors.white)
     writeAt(rx, 8, "Uptime:", colors.yellow); writeAt(rx + 9, 8, formatTime(nowSeconds() - STATE.started), colors.white)
     writeAt(rx, 9, "Scans:", colors.yellow); writeAt(rx + 9, 9, tostring(STATE.scans), colors.white)
-    writeAt(rx, 10, "Session Sent:", colors.yellow); writeAt(rx + 14, 10, tostring(STATE.sent), colors.green)
-    writeAt(rx, 11, "Session Craft:", colors.yellow); writeAt(rx + 15, 11, tostring(STATE.crafting), colors.yellow)
+    writeAt(rx, 10, "Pending:", colors.yellow); writeAt(rx + 10, 10, tostring(#STATE.pendingOrder), #STATE.pendingOrder > 0 and colors.yellow or colors.gray)
+    writeAt(rx, 11, "Session Sent:", colors.yellow); writeAt(rx + 14, 11, tostring(STATE.sent), colors.green)
     writeAt(rx, 12, "Last:", colors.yellow); writeAt(rx + 7, 12, trimText(STATE.lastAction, rightW - 10), colors.white)
 
     local reqY = 15
@@ -726,7 +815,7 @@ local function drawDashboardPage(countdown)
     if footerY + 4 <= h then
         drawBox(1, footerY, leftW, 5, " Scan Summary ", colors.gray)
         drawBox(leftW + 2, footerY, rightW, 5, " Recent Actions ", colors.gray)
-        writeAt(3, footerY + 1, "Requests: " .. tostring(STATE.stats.total), colors.white)
+        writeAt(3, footerY + 1, "Requests: " .. tostring(STATE.stats.total) .. "  Pending: " .. tostring(STATE.stats.pending), colors.white)
         writeAt(3, footerY + 2, "Sent: " .. tostring(STATE.stats.sent) .. "  Craft: " .. tostring(STATE.stats.crafting), colors.green)
         writeAt(3, footerY + 3, "Wait: " .. tostring(STATE.stats.waiting) .. "  Manual: " .. tostring(STATE.stats.skipped), colors.gray)
         writeAt(3, footerY + 4, "Missing: " .. tostring(STATE.stats.missing) .. "  Bad: " .. tostring(STATE.stats.bad), colors.red)
@@ -738,8 +827,41 @@ local function drawRequestsPage(countdown)
     clearScreen(); drawHeader(countdown)
     local w, h = term.getSize()
     drawBox(1, 5, w, h - 5, " Request Details ", colors.gray)
-    writeAt(3, 6, "Mode: " .. STATE.mode .. " | Pending: " .. tostring(#STATE.pendingOrder) .. " | Control from small monitor", colors.yellow)
+    writeAt(3, 6, "Mode: " .. STATE.mode .. " | Pending: " .. tostring(#STATE.pendingOrder) .. " | Safe requests are the build-material automation", colors.yellow)
     drawRequestRows(3, 8, w - 4, h - 9, STATE.requestRows)
+end
+
+local function drawBuildPage(countdown)
+    clearScreen(); drawHeader(countdown)
+    local w, h = term.getSize()
+    local half = math.floor((w - 3) / 2)
+    drawBox(1, 5, half, h - 5, " Build Material Totals ", colors.gray)
+    drawBox(half + 2, 5, w - half - 1, h - 5, " Work Orders / Sites ", colors.gray)
+
+    if #STATE.buildRows == 0 then
+        writeAt(3, 7, "No material requests found.", colors.lime)
+    else
+        local y = 6
+        for _, row in ipairs(STATE.buildRows) do
+            y = y + 1
+            if y > h - 2 then break end
+            writeAt(3, y, trimText(row, half - 4), colors.white)
+        end
+    end
+
+    if #STATE.workOrderRows == 0 then
+        writeAt(half + 4, 7, "Construction Sites: " .. tostring(STATE.status.constructionSites), colors.white)
+        writeAt(half + 4, 8, "No detailed work-order method found.", colors.gray)
+        writeAt(half + 4, 10, "MineColonies requests are used as", colors.gray)
+        writeAt(half + 4, 11, "the build material source.", colors.gray)
+    else
+        local y = 6
+        for _, row in ipairs(STATE.workOrderRows) do
+            y = y + 1
+            if y > h - 2 then break end
+            writeAt(half + 4, y, trimText(row, w - half - 5), colors.white)
+        end
+    end
 end
 
 local function drawPendingPage(countdown)
@@ -751,7 +873,9 @@ local function drawPendingPage(countdown)
     for i, key in ipairs(STATE.pendingOrder) do
         local p = STATE.pending[key]
         if p then
-            writeAt(3, y, tostring(i) .. ". " .. tostring(p.parsed.amount) .. "x " .. trimText(p.parsed.itemName, w - 12), i == 1 and colors.yellow or colors.white)
+            local prefix = i == STATE.selectedPending and "> " or "  "
+            local msg = prefix .. tostring(i) .. "/" .. tostring(#STATE.pendingOrder) .. " " .. tostring(p.parsed.amount) .. "x " .. p.parsed.itemName .. " (" .. tostring(p.reason) .. ")"
+            writeAt(3, y, trimText(msg, w - 6), i == STATE.selectedPending and colors.yellow or colors.white)
             y = y + 1
             if y > h - 2 then break end
         end
@@ -764,7 +888,9 @@ local function drawHistoryPage(countdown)
     drawBox(1, 5, w, h - 5, " History ", colors.gray)
     local lines = readLines(CONFIG.historyFile, CONFIG.maxHistoryLines)
     local y = 6
-    for i = math.max(1, #lines - (h - 8)), #lines do
+    local maxVisible = h - 7
+    local start = math.max(1, #lines - maxVisible + 1)
+    for i = start, #lines do
         if lines[i] then writeAt(3, y, trimText(lines[i], w - 4), colors.white); y = y + 1 end
     end
     if #lines == 0 then centerAt(8, "No history yet.", colors.gray) end
@@ -774,21 +900,26 @@ local function drawSettingsPage(countdown)
     clearScreen(); drawHeader(countdown)
     local w, h = term.getSize()
     drawBox(1, 5, w, h - 5, " Settings / Rules ", colors.gray)
-    local whitelistCount, blacklistCount = 0, 0
+    local whitelistCount, blacklistCount, protectedCount = 0, 0, 0
     for _ in pairs(WHITELIST) do whitelistCount = whitelistCount + 1 end
     for _ in pairs(BLACKLIST) do blacklistCount = blacklistCount + 1 end
+    for _ in pairs(PROTECTED) do protectedCount = protectedCount + 1 end
     writeAt(3, 7, "Mode: " .. STATE.mode, colors.yellow)
-    writeAt(3, 8, "Output Target: " .. CONFIG.outputTarget, colors.white)
-    writeAt(3, 9, "Whitelist Items: " .. tostring(whitelistCount), colors.lime)
-    writeAt(3, 10, "Blacklist Items: " .. tostring(blacklistCount), colors.red)
-    writeAt(3, 12, "AUTO      = safe requests send unless blacklisted", colors.white)
-    writeAt(3, 13, "APPROVAL  = requests wait for approval", colors.white)
-    writeAt(3, 14, "WHITELIST = only ALWAYS-approved items send", colors.white)
+    writeAt(3, 8, "Paused: " .. tostring(STATE.paused), STATE.paused and colors.orange or colors.white)
+    writeAt(3, 9, "Output Target: " .. CONFIG.outputTarget, colors.white)
+    writeAt(3, 10, "Whitelist Items: " .. tostring(whitelistCount), colors.lime)
+    writeAt(3, 11, "Blacklist Items: " .. tostring(blacklistCount), colors.red)
+    writeAt(3, 12, "Protected Items: " .. tostring(protectedCount), colors.yellow)
+    writeAt(3, 14, "AUTO      = safe requests send unless blacklisted/protected", colors.white)
+    writeAt(3, 15, "APPROVAL  = requests wait for approval", colors.white)
+    writeAt(3, 16, "WHITELIST = only ALWAYS-approved items send", colors.white)
+    writeAt(3, 18, "Protected items always require approval unless ALWAYS-approved.", colors.gray)
 end
 
 local function drawMain(countdown)
     withScreen(MAIN, function()
         if STATE.page == "REQUESTS" then drawRequestsPage(countdown)
+        elseif STATE.page == "BUILD" then drawBuildPage(countdown)
         elseif STATE.page == "PENDING" then drawPendingPage(countdown)
         elseif STATE.page == "HISTORY" then drawHistoryPage(countdown)
         elseif STATE.page == "SETTINGS" then drawSettingsPage(countdown)
@@ -796,8 +927,8 @@ local function drawMain(countdown)
     end)
 end
 
-local function drawControlButton(x, y, w, label, action, active)
-    addButton(CONTROL.name, x, y, w, 3, label, action, active and colors.lime or colors.gray)
+local function controlButton(x, y, w, label, action, active)
+    addButton(CONTROL.name, x, y, w, 2, label, action, active and colors.lime or colors.gray)
 end
 
 local function drawControl(countdown)
@@ -809,31 +940,39 @@ local function drawControl(countdown)
         centerAt(2, "Next Scan: " .. tostring(countdown) .. "s", colors.cyan)
         fillAt(1, 3, w, "=", STATE.status.underAttack and colors.red or colors.gray)
 
-        local colW = math.floor((w - 4) / 3)
-        if colW < 6 then colW = 6 end
-        drawControlButton(2, 5, colW, "AUTO", function() setMode("AUTO") end, STATE.mode == "AUTO")
-        drawControlButton(3 + colW, 5, colW, "APPROVAL", function() setMode("APPROVAL") end, STATE.mode == "APPROVAL")
-        drawControlButton(4 + colW * 2, 5, colW, "WHITE", function() setMode("WHITELIST") end, STATE.mode == "WHITELIST")
+        local colW = math.max(6, math.floor((w - 4) / 3))
+        controlButton(2, 4, colW, "AUTO", function() setMode("AUTO") end, STATE.mode == "AUTO")
+        controlButton(3 + colW, 4, colW, "APPROVAL", function() setMode("APPROVAL") end, STATE.mode == "APPROVAL")
+        controlButton(4 + colW * 2, 4, colW, "WHITE", function() setMode("WHITELIST") end, STATE.mode == "WHITELIST")
 
-        drawControlButton(2, 9, colW, "DASH", function() setPage("DASHBOARD") end, STATE.page == "DASHBOARD")
-        drawControlButton(3 + colW, 9, colW, "REQUESTS", function() setPage("REQUESTS") end, STATE.page == "REQUESTS")
-        drawControlButton(4 + colW * 2, 9, colW, "PENDING", function() setPage("PENDING") end, STATE.page == "PENDING")
+        controlButton(2, 7, colW, "DASH", function() setPage("DASHBOARD") end, STATE.page == "DASHBOARD")
+        controlButton(3 + colW, 7, colW, "REQ", function() setPage("REQUESTS") end, STATE.page == "REQUESTS")
+        controlButton(4 + colW * 2, 7, colW, "BUILD", function() setPage("BUILD") end, STATE.page == "BUILD")
 
-        drawControlButton(2, 13, colW, "HISTORY", function() setPage("HISTORY") end, STATE.page == "HISTORY")
-        drawControlButton(3 + colW, 13, colW, "SETTINGS", function() setPage("SETTINGS") end, STATE.page == "SETTINGS")
-        drawControlButton(4 + colW * 2, 13, colW, "SCAN NOW", function() STATE.nextScanNow = true; addAction("Manual scan queued") end, false)
+        controlButton(2, 10, colW, "PENDING", function() setPage("PENDING") end, STATE.page == "PENDING")
+        controlButton(3 + colW, 10, colW, "HISTORY", function() setPage("HISTORY") end, STATE.page == "HISTORY")
+        controlButton(4 + colW * 2, 10, colW, "SETTINGS", function() setPage("SETTINGS") end, STATE.page == "SETTINGS")
 
-        local y = 18
-        local key, pending = firstPending()
-        if pending and y + 7 <= h then
-            writeAt(2, y - 1, "Pending: " .. trimText(pending.parsed.amount .. "x " .. pending.parsed.itemName, w - 11), colors.yellow)
-            local half = math.floor((w - 5) / 2)
-            addButton(CONTROL.name, 2, y, half, 3, "APPROVE", function() approveNext(false); STATE.nextScanNow = true end, colors.lime)
-            addButton(CONTROL.name, 3 + half, y, half, 3, "ALWAYS", function() approveNext(true); STATE.nextScanNow = true end, colors.green)
-            addButton(CONTROL.name, 2, y + 4, half, 3, "DENY", function() denyNext(false); STATE.nextScanNow = true end, colors.orange)
-            addButton(CONTROL.name, 3 + half, y + 4, half, 3, "BLACKLIST", function() denyNext(true); STATE.nextScanNow = true end, colors.red)
+        controlButton(2, 13, colW, STATE.paused and "RESUME" or "PAUSE", function() setPaused(not STATE.paused) end, STATE.paused)
+        controlButton(3 + colW, 13, colW, "SCAN NOW", function() STATE.nextScanNow = true; addAction("Manual scan queued") end, false)
+        controlButton(4 + colW * 2, 13, colW, "CLR HIST", function() clearHistory() end, false)
+
+        local y = 16
+        local key, pending = selectedPending()
+        if pending then
+            writeAt(2, y, "Pending " .. tostring(STATE.selectedPending) .. "/" .. tostring(#STATE.pendingOrder) .. ": " .. trimText(pending.parsed.amount .. "x " .. pending.parsed.itemName, w - 18), colors.yellow)
+            writeAt(2, y + 1, "Reason: " .. trimText(pending.reason, w - 10), colors.gray)
+
+            local half = math.max(8, math.floor((w - 5) / 2))
+            addButton(CONTROL.name, 2, y + 3, half, 2, "PREV", function() nextPending(-1) end, colors.gray)
+            addButton(CONTROL.name, 3 + half, y + 3, half, 2, "NEXT", function() nextPending(1) end, colors.gray)
+            addButton(CONTROL.name, 2, y + 6, half, 2, "APPROVE", function() approveSelected(false); STATE.nextScanNow = true end, colors.lime)
+            addButton(CONTROL.name, 3 + half, y + 6, half, 2, "ALWAYS", function() approveSelected(true); STATE.nextScanNow = true end, colors.green)
+            addButton(CONTROL.name, 2, y + 9, half, 2, "DENY", function() denySelected(false); STATE.nextScanNow = true end, colors.orange)
+            addButton(CONTROL.name, 3 + half, y + 9, half, 2, "BLACKLIST", function() denySelected(true); STATE.nextScanNow = true end, colors.red)
         else
-            centerAt(math.min(y, h - 2), "No pending approvals", colors.gray)
+            centerAt(y + 2, "No pending approvals", colors.gray)
+            centerAt(y + 4, "Switch to APPROVAL mode to review all requests.", colors.gray)
         end
 
         if STATE.status.underAttack then centerAt(h - 1, "!!! COLONY UNDER ATTACK !!!", colors.red) else centerAt(h - 1, "AE2 LINKED | COLONY LINKED", colors.gray) end
@@ -863,13 +1002,29 @@ local function addRequestRow(rows, text, color)
     if #rows < CONFIG.maxShownRequests then table.insert(rows, { text = text, color = color }) end
 end
 
-local function shouldProcessRequest(key, parsed, newPending, newOrder)
+local function buildMaterialRows(parsedList)
+    local totals = {}
+    for _, parsed in ipairs(parsedList) do
+        totals[parsed.itemName] = (totals[parsed.itemName] or 0) + (tonumber(parsed.amount) or 1)
+    end
+    local rows = {}
+    for item, amount in pairs(totals) do table.insert(rows, tostring(amount) .. "x " .. item) end
+    table.sort(rows)
+    while #rows > CONFIG.maxBuildRows do table.remove(rows) end
+    return rows
+end
+
+local function shouldProcessRequest(key, parsed, newPending, newOrder, skipReason)
     if BLACKLIST[parsed.itemName] then return false, "BLACKLISTED" end
     if STATE.deniedUntil[key] and STATE.deniedUntil[key] > nowSeconds() then return false, "DENIED" end
+    if STATE.paused then addPending(newPending, newOrder, key, parsed, "paused"); return false, "PENDING" end
     if STATE.approvedOnce[key] then return true, "APPROVED" end
+    if WHITELIST[parsed.itemName] then return true, "WHITELIST" end
+    if skipReason then addPending(newPending, newOrder, key, parsed, skipReason); return false, "PENDING" end
+    if PROTECTED[parsed.itemName] then addPending(newPending, newOrder, key, parsed, "protected item"); return false, "PENDING" end
     if STATE.mode == "AUTO" then return true, "AUTO" end
-    if STATE.mode == "WHITELIST" and WHITELIST[parsed.itemName] then return true, "WHITELIST" end
-    addPending(newPending, newOrder, key, parsed)
+    if STATE.mode == "WHITELIST" then addPending(newPending, newOrder, key, parsed, "not whitelisted"); return false, "PENDING" end
+    addPending(newPending, newOrder, key, parsed, "approval mode")
     return false, "PENDING"
 end
 
@@ -933,10 +1088,11 @@ local function performScan()
     STATE.colonyName = getColonyName()
     STATE.status = getColonyStatus()
 
-    local stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0 }
+    local stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 }
     local rows = {}
     local newPending = {}
     local newOrder = {}
+    local parsedList = {}
 
     local requests, err = getRequests()
     if not requests then
@@ -957,33 +1113,34 @@ local function performScan()
             stats.bad = stats.bad + 1
             logError("Bad request: " .. tostring(parseErr))
         else
+            table.insert(parsedList, parsed)
             local skip, skipReason = shouldSkipRequest(req, parsed)
             local key = requestKey(parsed)
-            if skip then
+            local allowed, reason = shouldProcessRequest(key, parsed, newPending, newOrder, skip and skipReason or nil)
+            if allowed then
+                processParsedRequest(parsed, rows, stats)
+            elseif reason == "PENDING" then
+                stats.pending = stats.pending + 1
+                stats.waiting = stats.waiting + 1
+                local pendingReason = newPending[key] and newPending[key].reason or "pending"
+                addRequestRow(rows, "[PENDING] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 39) .. " (" .. trimText(pendingReason, 14) .. ")", colors.yellow)
+            elseif reason == "BLACKLISTED" then
                 stats.skipped = stats.skipped + 1
-                addRequestRow(rows, "[MANUAL] " .. trimText(parsed.displayName, 45) .. " (" .. trimText(skipReason, 18) .. ")", colors.lightBlue)
+                addRequestRow(rows, "[BLOCKED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.red)
             else
-                local allowed, reason = shouldProcessRequest(key, parsed, newPending, newOrder)
-                if allowed then
-                    processParsedRequest(parsed, rows, stats)
-                elseif reason == "PENDING" then
-                    stats.waiting = stats.waiting + 1
-                    addRequestRow(rows, "[PENDING] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.yellow)
-                elseif reason == "BLACKLISTED" then
-                    stats.skipped = stats.skipped + 1
-                    addRequestRow(rows, "[BLOCKED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.red)
-                else
-                    stats.waiting = stats.waiting + 1
-                    addRequestRow(rows, "[DENIED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.orange)
-                end
+                stats.waiting = stats.waiting + 1
+                addRequestRow(rows, "[DENIED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.orange)
             end
         end
     end
 
     STATE.pending = newPending
     STATE.pendingOrder = newOrder
+    normalizeSelectedPending()
     STATE.stats = stats
     STATE.requestRows = rows
+    STATE.buildRows = buildMaterialRows(parsedList)
+    STATE.workOrderRows = getWorkOrderRows()
     STATE.manual = STATE.manual + stats.skipped
     STATE.waiting = STATE.waiting + stats.waiting
     STATE.bad = STATE.bad + stats.bad
