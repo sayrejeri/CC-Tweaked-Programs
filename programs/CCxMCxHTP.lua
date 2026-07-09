@@ -1,83 +1,34 @@
 -- startup
 -- HackThePlanet CC & MineColonies Program
 -- CC:Tweaked + Advanced Peripherals + AE2 + MineColonies
--- Dual-monitor AE2 auto-supply dashboard + touch control panel.
-
--------------------------
--- CONFIG
--------------------------
+-- Dual-monitor AE2 supply dashboard with approvals, build page, and citizens page.
 
 local CONFIG = {
     outputTarget = "bottom",
     scanSeconds = 30,
+    splashSeconds = 15,
+    monitorScale = 0.5,
+    maxExportPerRequest = 512,
+    maxCraftPerRequest = 512,
     requestCooldownSeconds = 120,
     craftCooldownSeconds = 300,
     denyCooldownSeconds = 300,
-    maxExportPerRequest = 512,
-    maxCraftPerRequest = 512,
     autoCraft = true,
-    skipNBT = true,
-    skipGenericRequests = true,
-
-    -- AUTO = safe requests send automatically unless blacklisted/protected
-    -- APPROVAL = requests wait for monitor approval
-    -- WHITELIST = only whitelisted/ALWAYS-approved items send automatically
-    defaultMode = "AUTO",
-
-    splashSeconds = 15,
-    splashTitle = "HackThePlanet",
-    splashSubtitle = "CC & MineColonies Program",
-    splashFooter = "AE2 Auto-Supply Command Center",
-
-    monitorScale = 0.5,
-    mainMonitorName = nil,
-    controlMonitorName = nil,
-
+    defaultMode = "AUTO", -- AUTO / APPROVAL / WHITELIST
     settingsFile = "htp_settings.cfg",
     whitelistFile = "htp_whitelist.txt",
-    blacklistFile = "htp_blacklist.txt",
-    protectedFile = "htp_protected.txt",
-    logFile = "htp_colony.log",
-    errorLogFile = "htp_colony_errors.log",
+    blockedFile = "htp_blacklist.txt",
     historyFile = "htp_history.log",
-
-    maxShownRequests = 10,
-    maxRecentActions = 6,
-    maxHistoryLines = 40,
-    maxBuildRows = 32
+    errorFile = "htp_colony_errors.log",
+    maxRows = 12,
+    maxHistoryLines = 80
 }
-
-local DEFAULT_PROTECTED = {
-    ["minecraft:diamond"] = true,
-    ["minecraft:diamond_block"] = true,
-    ["minecraft:emerald"] = true,
-    ["minecraft:emerald_block"] = true,
-    ["minecraft:netherite_ingot"] = true,
-    ["minecraft:netherite_block"] = true,
-    ["minecraft:nether_star"] = true,
-    ["minecraft:dragon_egg"] = true,
-    ["allthemodium:allthemodium_ingot"] = true,
-    ["allthemodium:allthemodium_block"] = true,
-    ["allthemodium:vibranium_ingot"] = true,
-    ["allthemodium:vibranium_block"] = true,
-    ["allthemodium:unobtainium_ingot"] = true,
-    ["allthemodium:unobtainium_block"] = true
-}
-
--------------------------
--- PERIPHERALS
--------------------------
 
 local nativeTerm = term.current()
 local bridge = peripheral.find("me_bridge") or peripheral.find("meBridge")
 local colony = peripheral.find("colony_integrator") or peripheral.find("colonyIntegrator")
-
-if not bridge then error("No ME Bridge found. Add/connect an Advanced Peripherals ME Bridge.") end
-if not colony then error("No Colony Integrator found. Add/connect a Colony Integrator inside your colony.") end
-
--------------------------
--- HELPERS
--------------------------
+if not bridge then error("No ME Bridge found. Connect an Advanced Peripherals ME Bridge.") end
+if not colony then error("No Colony Integrator found. Connect a Colony Integrator inside your colony.") end
 
 local function safe(fn, fallback)
     local ok, result = pcall(fn)
@@ -85,76 +36,62 @@ local function safe(fn, fallback)
     return fallback, result
 end
 
-local function nowSeconds()
+local function now()
     if os.epoch then return math.floor(os.epoch("utc") / 1000) end
     return math.floor(os.clock())
 end
 
-local function hasMethod(obj, name)
-    return type(obj[name]) == "function"
+local function has(obj, method) return type(obj[method]) == "function" end
+local function text(v) return tostring(v or "") end
+local function lower(v) return string.lower(text(v)) end
+local function trim(v, max)
+    v = text(v)
+    max = tonumber(max) or 20
+    if max <= 0 then return "" end
+    if #v <= max then return v end
+    if max <= 3 then return string.sub(v, 1, max) end
+    return string.sub(v, 1, max - 3) .. "..."
 end
 
-local function lower(value)
-    return string.lower(tostring(value or ""))
-end
-
-local function trimText(text, maxLen)
-    text = tostring(text or "")
-    maxLen = tonumber(maxLen) or 20
-    if maxLen <= 0 then return "" end
-    if #text <= maxLen then return text end
-    if maxLen <= 3 then return string.sub(text, 1, maxLen) end
-    return string.sub(text, 1, maxLen - 3) .. "..."
-end
-
-local function formatNumber(value, places)
-    local n = tonumber(value)
-    if not n then return tostring(value or "?") end
+local function fmtNum(v, places)
+    local n = tonumber(v)
+    if not n then return text(v or "?") end
     if places and places > 0 then return string.format("%." .. tostring(places) .. "f", n) end
     return tostring(math.floor(n + 0.5))
 end
 
-local function formatTime(seconds)
+local function fmtTime(seconds)
     seconds = math.max(0, tonumber(seconds) or 0)
     local h = math.floor(seconds / 3600)
     local m = math.floor((seconds % 3600) / 60)
     local s = math.floor(seconds % 60)
-    if h > 0 then return tostring(h) .. "h " .. tostring(m) .. "m" end
-    if m > 0 then return tostring(m) .. "m " .. tostring(s) .. "s" end
-    return tostring(s) .. "s"
+    if h > 0 then return h .. "h " .. m .. "m" end
+    if m > 0 then return m .. "m " .. s .. "s" end
+    return s .. "s"
 end
 
-local function writeFileLine(path, text)
+local function append(path, line)
     local f = fs.open(path, "a")
-    if f then
-        f.writeLine("[" .. tostring(nowSeconds()) .. "] " .. tostring(text))
-        f.close()
-    end
+    if f then f.writeLine("[" .. now() .. "] " .. text(line)); f.close() end
 end
-
-local function logInfo(text) writeFileLine(CONFIG.logFile, text) end
-local function logError(text) writeFileLine(CONFIG.errorLogFile, text) end
-local function logHistory(text) writeFileLine(CONFIG.historyFile, text) end
 
 local function readLines(path, limit)
-    local lines = {}
-    if not fs.exists(path) then return lines end
+    local out = {}
+    if not fs.exists(path) then return out end
     local f = fs.open(path, "r")
-    if not f then return lines end
+    if not f then return out end
     while true do
         local line = f.readLine()
         if not line then break end
-        table.insert(lines, line)
+        table.insert(out, line)
     end
     f.close()
-
-    if limit and #lines > limit then
-        local out = {}
-        for i = math.max(1, #lines - limit + 1), #lines do table.insert(out, lines[i]) end
-        return out
+    if limit and #out > limit then
+        local trimmed = {}
+        for i = math.max(1, #out - limit + 1), #out do table.insert(trimmed, out[i]) end
+        return trimmed
     end
-
-    return lines
+    return out
 end
 
 local function loadSet(path)
@@ -170,25 +107,18 @@ end
 local function saveSet(path, set)
     local f = fs.open(path, "w")
     if not f then return end
-    local list = {}
-    for key, value in pairs(set) do if value == true then table.insert(list, key) end end
-    table.sort(list)
-    for _, item in ipairs(list) do f.writeLine(item) end
+    local keys = {}
+    for key, value in pairs(set) do if value then table.insert(keys, key) end end
+    table.sort(keys)
+    for _, key in ipairs(keys) do f.writeLine(key) end
     f.close()
-end
-
-local function mergeSets(a, b)
-    local out = {}
-    for k, v in pairs(a or {}) do if v then out[k] = true end end
-    for k, v in pairs(b or {}) do if v then out[k] = true end end
-    return out
 end
 
 local function loadSettings()
     local settings = {}
     for _, line in ipairs(readLines(CONFIG.settingsFile)) do
-        local key, value = string.match(line, "^([%w_]+)%s*=%s*(.-)%s*$")
-        if key and value then settings[key] = value end
+        local k, v = string.match(line, "^([%w_]+)%s*=%s*(.-)%s*$")
+        if k and v then settings[k] = v end
     end
     return settings
 end
@@ -196,55 +126,29 @@ end
 local function saveSettings(settings)
     local f = fs.open(CONFIG.settingsFile, "w")
     if not f then return end
-    local keys = {}
-    for key, _ in pairs(settings) do table.insert(keys, key) end
-    table.sort(keys)
-    for _, key in ipairs(keys) do f.writeLine(key .. "=" .. tostring(settings[key])) end
+    for key, value in pairs(settings) do f.writeLine(key .. "=" .. text(value)) end
     f.close()
 end
-
--------------------------
--- MONITORS / UI HELPERS
--------------------------
 
 local MAIN = { name = "terminal", object = nativeTerm, w = 51, h = 19, area = 0 }
 local CONTROL = nil
 local BUTTONS = {}
 
-local function getMonitorSize(mon)
-    local ok, w, h = pcall(function() return mon.getSize() end)
-    if ok and type(w) == "number" and type(h) == "number" then return w, h end
-    return nil, nil
-end
-
-local function initMonitors()
+local function detectMonitors()
     local monitors = {}
-
     for _, name in ipairs(peripheral.getNames()) do
         if peripheral.getType(name) == "monitor" then
-            local m = peripheral.wrap(name)
-            pcall(function() m.setTextScale(CONFIG.monitorScale) end)
-            local w, h = getMonitorSize(m)
-            if w and h then
-                table.insert(monitors, { name = name, object = m, w = w, h = h, area = w * h })
+            local mon = peripheral.wrap(name)
+            pcall(function() mon.setTextScale(CONFIG.monitorScale) end)
+            local okSize, w, h = pcall(function() return mon.getSize() end)
+            if okSize and type(w) == "number" and type(h) == "number" then
+                table.insert(monitors, { name = name, object = mon, w = w, h = h, area = w * h })
             end
         end
     end
-
     table.sort(monitors, function(a, b) return a.area > b.area end)
-
-    if CONFIG.mainMonitorName then
-        for _, mon in ipairs(monitors) do if mon.name == CONFIG.mainMonitorName then MAIN = mon end end
-    elseif #monitors >= 1 then
-        MAIN = monitors[1]
-    end
-
-    if CONFIG.controlMonitorName then
-        for _, mon in ipairs(monitors) do if mon.name == CONFIG.controlMonitorName then CONTROL = mon end end
-    elseif #monitors >= 2 then
-        CONTROL = monitors[2]
-    end
-
+    if #monitors >= 1 then MAIN = monitors[1] end
+    if #monitors >= 2 then CONTROL = monitors[2] end
     if MAIN.object == nativeTerm then
         local w, h = term.getSize()
         MAIN.w, MAIN.h, MAIN.area = w, h, w * h
@@ -254,149 +158,122 @@ end
 local function withScreen(screen, fn)
     local old = term.current()
     term.redirect(screen.object)
-    local ok, err = pcall(fn)
+    local okRun, err = pcall(fn)
     term.redirect(old or nativeTerm)
-    if not ok then error(err) end
+    if not okRun then error(err) end
 end
 
-local function clearScreen()
+local function clear()
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
 end
 
-local function writeAt(x, y, text, color, bg)
+local function writeAt(x, y, value, color, background)
     local w, h = term.getSize()
-    if y < 1 or y > h then return end
+    if y < 1 or y > h or x > w then return end
     if x < 1 then x = 1 end
-    if x > w then return end
-    text = trimText(text, w - x + 1)
     term.setCursorPos(x, y)
-    term.setBackgroundColor(bg or colors.black)
+    term.setBackgroundColor(background or colors.black)
     term.setTextColor(color or colors.white)
-    term.write(text)
+    term.write(trim(value, w - x + 1))
     term.setBackgroundColor(colors.black)
 end
 
-local function fillAt(x, y, width, char, color, bg)
+local function fillAt(x, y, width, ch, color, background)
     width = math.max(0, tonumber(width) or 0)
-    if width <= 0 then return end
-    writeAt(x, y, string.rep(char or " ", width), color, bg)
+    if width > 0 then writeAt(x, y, string.rep(ch or " ", width), color, background) end
 end
 
-local function centerAt(y, text, color)
-    local w, h = term.getSize()
-    text = tostring(text or "")
-    writeAt(math.max(1, math.floor((w - #text) / 2) + 1), y, text, color)
+local function center(y, value, color)
+    local w = term.getSize()
+    value = text(value)
+    writeAt(math.max(1, math.floor((w - #value) / 2) + 1), y, value, color)
 end
 
-local function drawBox(x, y, width, height, title, color)
+local function box(x, y, w, h, title, color)
     color = color or colors.gray
-    width = math.max(4, tonumber(width) or 4)
-    height = math.max(3, tonumber(height) or 3)
-    writeAt(x, y, "+" .. string.rep("-", width - 2) .. "+", color)
-    for row = 1, height - 2 do
+    w = math.max(4, w)
+    h = math.max(3, h)
+    writeAt(x, y, "+" .. string.rep("-", w - 2) .. "+", color)
+    for row = 1, h - 2 do
         writeAt(x, y + row, "|", color)
-        fillAt(x + 1, y + row, width - 2, " ", colors.white, colors.black)
-        writeAt(x + width - 1, y + row, "|", color)
+        fillAt(x + 1, y + row, w - 2, " ", colors.white, colors.black)
+        writeAt(x + w - 1, y + row, "|", color)
     end
-    writeAt(x, y + height - 1, "+" .. string.rep("-", width - 2) .. "+", color)
-    if title and title ~= "" and width > 8 then writeAt(x + 2, y, " " .. trimText(title, width - 6) .. " ", colors.yellow) end
+    writeAt(x, y + h - 1, "+" .. string.rep("-", w - 2) .. "+", color)
+    if title then writeAt(x + 2, y, " " .. trim(title, w - 6) .. " ", colors.yellow) end
 end
 
-local function drawProgressBar(x, y, width, percent, color)
-    percent = math.max(0, math.min(100, tonumber(percent) or 0))
-    width = math.max(6, tonumber(width) or 6)
-    local filled = math.floor((percent / 100) * width)
-    writeAt(x, y, "[", colors.gray)
-    for i = 1, width do
-        if i <= filled then writeAt(x + i, y, "=", color or colors.lime) else writeAt(x + i, y, "-", colors.gray) end
-    end
-    writeAt(x + width + 1, y, "]", colors.gray)
-end
-
-local function addButton(screenName, x, y, width, height, label, action, color)
-    width = math.max(4, width)
-    height = math.max(1, height)
-    table.insert(BUTTONS, { screen = screenName, x1 = x, y1 = y, x2 = x + width - 1, y2 = y + height - 1, action = action, label = label })
+local function button(screenName, x, y, w, h, label, action, color)
+    table.insert(BUTTONS, { screen = screenName, x1 = x, y1 = y, x2 = x + w - 1, y2 = y + h - 1, action = action })
     color = color or colors.gray
-    for row = 0, height - 1 do writeAt(x, y + row, string.rep(" ", width), colors.white, color) end
-    local tx = x + math.max(0, math.floor((width - #label) / 2))
-    local ty = y + math.floor(height / 2)
-    writeAt(tx, ty, label, colors.black, color)
+    for row = 0, h - 1 do writeAt(x, y + row, string.rep(" ", w), colors.black, color) end
+    writeAt(x + math.max(0, math.floor((w - #label) / 2)), y + math.floor(h / 2), label, colors.black, color)
 end
 
--------------------------
--- STATE
--------------------------
-
-local SETTINGS = loadSettings()
+local settings = loadSettings()
 local WHITELIST = loadSet(CONFIG.whitelistFile)
-local BLACKLIST = loadSet(CONFIG.blacklistFile)
-local PROTECTED = mergeSets(DEFAULT_PROTECTED, loadSet(CONFIG.protectedFile))
+local BLOCKED = loadSet(CONFIG.blockedFile)
 
 local STATE = {
-    mode = SETTINGS.mode or CONFIG.defaultMode,
-    page = SETTINGS.page or "DASHBOARD",
-    paused = SETTINGS.paused == "true",
-    selectedPending = tonumber(SETTINGS.selectedPending or "1") or 1,
-    started = nowSeconds(),
+    mode = settings.mode or CONFIG.defaultMode,
+    page = settings.page or "DASHBOARD",
+    paused = settings.paused == "true",
+    selected = tonumber(settings.selected or "1") or 1,
+    started = now(),
     scans = 0,
     sent = 0,
-    crafting = 0,
+    craft = 0,
     missing = 0,
-    manual = 0,
-    waiting = 0,
-    bad = 0,
-    actions = {},
-    lastAction = "Program started",
     pending = {},
     pendingOrder = {},
     approvedOnce = {},
     deniedUntil = {},
-    requestRows = {},
+    rows = {},
     buildRows = {},
-    workOrderRows = {},
-    stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 },
+    workRows = {},
+    citizenRows = {},
+    actions = {},
+    lastAction = "Program started",
     colonyName = "Unknown Colony",
-    status = { citizens = "?", maxCitizens = "?", happiness = "?", underAttack = false, active = nil, constructionSites = "?", graves = "?" },
-    nextScanNow = false
+    status = {},
+    stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 },
+    scanNow = false
 }
 
-local function saveModeAndPage()
-    SETTINGS.mode = STATE.mode
-    SETTINGS.page = STATE.page
-    SETTINGS.paused = tostring(STATE.paused)
-    SETTINGS.selectedPending = tostring(STATE.selectedPending)
-    saveSettings(SETTINGS)
+local function saveState()
+    settings.mode = STATE.mode
+    settings.page = STATE.page
+    settings.paused = tostring(STATE.paused)
+    settings.selected = tostring(STATE.selected)
+    saveSettings(settings)
 end
 
-local function addAction(text)
-    text = tostring(text or "")
-    STATE.lastAction = text
-    table.insert(STATE.actions, 1, text)
-    while #STATE.actions > CONFIG.maxRecentActions do table.remove(STATE.actions) end
-    logHistory(text)
+local function action(message)
+    STATE.lastAction = message
+    table.insert(STATE.actions, 1, message)
+    while #STATE.actions > 6 do table.remove(STATE.actions) end
+    append(CONFIG.historyFile, message)
 end
 
 local function setMode(mode)
-    if mode ~= "AUTO" and mode ~= "APPROVAL" and mode ~= "WHITELIST" then return end
     STATE.mode = mode
-    saveModeAndPage()
-    addAction("Mode set to " .. mode)
+    saveState()
+    action("Mode set to " .. mode)
 end
 
 local function setPage(page)
     STATE.page = page
-    saveModeAndPage()
-    addAction("Page: " .. page)
+    saveState()
+    action("Page: " .. page)
 end
 
-local function setPaused(paused)
-    STATE.paused = paused == true
-    saveModeAndPage()
-    if STATE.paused then addAction("Auto supply paused") else addAction("Auto supply resumed") end
+local function setPaused(value)
+    STATE.paused = value == true
+    saveState()
+    action(STATE.paused and "Auto supply paused" or "Auto supply resumed")
 end
 
 local function clearHistory()
@@ -404,28 +281,7 @@ local function clearHistory()
     if f then f.close() end
     STATE.actions = {}
     STATE.lastAction = "History cleared"
-    logHistory("History cleared")
-end
-
--------------------------
--- BOOT SPLASH
--------------------------
-
-local function drawBoot(percent, step)
-    clearScreen()
-    local w, h = term.getSize()
-    local startY = math.max(2, math.floor(h / 2) - 7)
-    local barWidth = math.min(42, math.max(18, w - 12))
-    local barX = math.max(1, math.floor((w - barWidth - 2) / 2) + 1)
-    centerAt(startY, "========================================", colors.gray)
-    centerAt(startY + 1, CONFIG.splashTitle, colors.lime)
-    centerAt(startY + 2, CONFIG.splashSubtitle, colors.cyan)
-    centerAt(startY + 3, CONFIG.splashFooter, colors.yellow)
-    centerAt(startY + 4, "========================================", colors.gray)
-    centerAt(startY + 6, step, colors.white)
-    drawProgressBar(barX, startY + 8, barWidth, percent, colors.lime)
-    centerAt(startY + 10, tostring(percent) .. "%", colors.white)
-    centerAt(startY + 12, "Initializing" .. string.rep(".", percent % 4), colors.gray)
+    append(CONFIG.historyFile, "History cleared")
 end
 
 local function bootSplash()
@@ -433,120 +289,99 @@ local function bootSplash()
         "Booting HackThePlanet systems...",
         "Loading CC:Tweaked services...",
         "Connecting to AE2 network...",
-        "Checking ME Bridge peripheral...",
         "Checking MineColonies Integrator...",
         "Detecting dual monitors...",
-        "Loading whitelist / blacklist / protected rules...",
-        "Preparing approval controls...",
-        "Reading building request pages...",
+        "Loading approval rules...",
+        "Loading build and citizen pages...",
         "System ready."
     }
-
-    local totalTicks = math.max(20, (CONFIG.splashSeconds or 15) * 10)
-    for tick = 1, totalTicks do
-        local percent = math.floor((tick / totalTicks) * 100)
-        local stepIndex = math.min(#steps, math.max(1, math.ceil((percent / 100) * #steps)))
-        withScreen(MAIN, function() drawBoot(percent, steps[stepIndex]) end)
-        if CONTROL then withScreen(CONTROL, function() drawBoot(percent, "Control Panel: " .. steps[stepIndex]) end) end
+    local ticks = math.max(20, CONFIG.splashSeconds * 10)
+    for tick = 1, ticks do
+        local percent = math.floor((tick / ticks) * 100)
+        local step = steps[math.min(#steps, math.max(1, math.ceil((percent / 100) * #steps)))]
+        local function draw()
+            clear()
+            local w, h = term.getSize()
+            local y = math.max(2, math.floor(h / 2) - 6)
+            center(y, "========================================", colors.gray)
+            center(y + 1, "HackThePlanet", colors.lime)
+            center(y + 2, "CC & MineColonies Program", colors.cyan)
+            center(y + 3, "AE2 Auto-Supply Command Center", colors.yellow)
+            center(y + 5, step, colors.white)
+            local bw = math.min(42, math.max(18, w - 12))
+            local bx = math.max(1, math.floor((w - bw - 2) / 2) + 1)
+            writeAt(bx, y + 7, "[", colors.gray)
+            local filled = math.floor((percent / 100) * bw)
+            for i = 1, bw do writeAt(bx + i, y + 7, i <= filled and "=" or "-", i <= filled and colors.lime or colors.gray) end
+            writeAt(bx + bw + 1, y + 7, "]", colors.gray)
+            center(y + 9, percent .. "%", colors.white)
+        end
+        withScreen(MAIN, draw)
+        if CONTROL then withScreen(CONTROL, draw) end
         sleep(0.1)
     end
 end
 
--------------------------
--- AE2
--------------------------
-
-local function getAEItem(itemName)
-    local result = safe(function() return bridge.getItem({ name = itemName }) end, nil)
-    if type(result) == "table" then return result end
-    return nil
+local function aeCount(itemName)
+    local item = safe(function() return bridge.getItem({ name = itemName }) end, nil)
+    if type(item) == "table" then return tonumber(item.amount or item.count or 0) or 0 end
+    return 0
 end
 
-local function getAECount(itemName)
-    local item = getAEItem(itemName)
-    if type(item) ~= "table" then return 0 end
-    return tonumber(item.amount or item.count or 0) or 0
-end
-
-local function isAEItemCrafting(itemName)
-    if hasMethod(bridge, "isCrafting") and safe(function() return bridge.isCrafting({ name = itemName }) end, false) == true then return true end
-    if hasMethod(bridge, "isItemCrafting") and safe(function() return bridge.isItemCrafting({ name = itemName }) end, false) == true then return true end
-    return false
-end
-
-local function exportAEItem(itemName, amount)
-    amount = math.max(1, tonumber(amount) or 1)
-    amount = math.min(amount, CONFIG.maxExportPerRequest)
-    local before = getAECount(itemName)
+local function exportItem(itemName, amount)
+    amount = math.max(1, math.min(tonumber(amount) or 1, CONFIG.maxExportPerRequest))
+    local before = aeCount(itemName)
     if before <= 0 then return 0, "none in AE2" end
     amount = math.min(amount, before)
-
     local result, err
-    if hasMethod(bridge, "exportItem") then
+    if has(bridge, "exportItem") then
         result, err = safe(function() return bridge.exportItem({ name = itemName, count = amount }, CONFIG.outputTarget) end, nil)
-    elseif hasMethod(bridge, "exportItemToPeripheral") then
+    elseif has(bridge, "exportItemToPeripheral") then
         result, err = safe(function() return bridge.exportItemToPeripheral({ name = itemName, count = amount }, CONFIG.outputTarget) end, nil)
     else
-        return 0, "ME Bridge has no export method"
+        return 0, "no export method"
     end
-
     if type(result) == "number" then return result, nil end
     if type(result) == "table" then
         local moved = tonumber(result.amount or result.count or result.transferred or result.exported or 0) or 0
         if moved > 0 then return moved, nil end
     end
-
     sleep(0.15)
-    local after = getAECount(itemName)
-    local movedByCount = math.max(0, before - after)
+    local movedByCount = math.max(0, before - aeCount(itemName))
     if movedByCount > 0 then return movedByCount, nil end
-    return 0, tostring(err or result or "export failed")
+    return 0, text(err or result or "export failed")
 end
 
-local recentCrafts = {}
-local function craftKey(itemName, amount) return tostring(itemName) .. "|" .. tostring(amount) end
-local function craftOnCooldown(key) local last = recentCrafts[key]; return last and (nowSeconds() - last < CONFIG.craftCooldownSeconds) end
-
-local function requestAECraft(itemName, amount)
-    if not CONFIG.autoCraft then return false, "autocraft disabled" end
-    amount = math.max(1, tonumber(amount) or 1)
-    amount = math.min(amount, CONFIG.maxCraftPerRequest)
-    local key = craftKey(itemName, amount)
-    if craftOnCooldown(key) then return true, "craft cooldown" end
-    if isAEItemCrafting(itemName) then recentCrafts[key] = nowSeconds(); return true, "already crafting" end
-    if not hasMethod(bridge, "craftItem") then return false, "ME Bridge has no craftItem method" end
-
+local craftCooldown = {}
+local function craftItem(itemName, amount)
+    if not CONFIG.autoCraft then return false, "craft disabled" end
+    amount = math.max(1, math.min(tonumber(amount) or 1, CONFIG.maxCraftPerRequest))
+    local key = itemName .. "|" .. amount
+    if craftCooldown[key] and now() - craftCooldown[key] < CONFIG.craftCooldownSeconds then return true, "craft cooldown" end
+    if has(bridge, "isCrafting") and safe(function() return bridge.isCrafting({ name = itemName }) end, false) == true then
+        craftCooldown[key] = now()
+        return true, "already crafting"
+    end
+    if not has(bridge, "craftItem") then return false, "no craftItem method" end
     local result, err = safe(function() return bridge.craftItem({ name = itemName, count = amount }) end, nil)
     if result == true or type(result) == "table" or (result == nil and err == nil) then
-        recentCrafts[key] = nowSeconds()
+        craftCooldown[key] = now()
         return true, "craft scheduled"
     end
-    return false, tostring(err or result or "craft failed")
+    return false, text(err or result or "craft failed")
 end
 
--------------------------
--- MINECOLONIES PARSING
--------------------------
-
-local genericSkipWords = {
-    "tool of class", "of class", "minimum level", "maximum level", "armor", "equipment", "repair",
-    "food", "fuel", "compostable", "fertilizer", "flowers", "smeltable ore", "stack list",
-    "rallying banner", "guard tool", "crafter"
-}
-
-local itemNameSkipWords = {
-    "sword", "pickaxe", "axe", "shovel", "hoe", "helmet", "chestplate", "leggings", "boots",
-    "shield", "bow", "crossbow", "trident"
-}
+local manualWords = { "tool of class", "of class", "minimum level", "maximum level", "armor", "equipment", "repair", "food", "fuel", "compostable", "fertilizer", "flowers", "smeltable ore", "stack list", "rallying banner", "guard tool", "crafter" }
+local toolWords = { "sword", "pickaxe", "axe", "shovel", "hoe", "helmet", "chestplate", "leggings", "boots", "shield", "bow", "crossbow", "trident" }
 
 local function requestText(req)
     local parts = { req.name, req.desc, req.description, req.target, req.state, req.id }
-    local text = ""
-    for _, part in ipairs(parts) do text = text .. " " .. tostring(part or "") end
-    return lower(text)
+    local out = ""
+    for _, part in ipairs(parts) do out = out .. " " .. text(part) end
+    return lower(out)
 end
 
-local function findFirstItemTable(req)
+local function firstItemTable(req)
     local candidates = {}
     if type(req.items) == "table" then
         if #req.items > 0 then for _, item in ipairs(req.items) do table.insert(candidates, item) end else table.insert(candidates, req.items) end
@@ -554,20 +389,16 @@ local function findFirstItemTable(req)
     if type(req.item) == "table" then table.insert(candidates, req.item) end
     if type(req.stack) == "table" then table.insert(candidates, req.stack) end
     if type(req.requestedItem) == "table" then table.insert(candidates, req.requestedItem) end
-
     for _, item in ipairs(candidates) do
-        if type(item) == "table" then
-            local name = item.name or item.item or item.id or item.itemName
-            if type(name) == "string" and name ~= "" and name ~= "minecraft:air" then return item end
-        end
+        local name = item.name or item.item or item.id or item.itemName
+        if type(name) == "string" and name ~= "" and name ~= "minecraft:air" then return item end
     end
     return nil
 end
 
-local function getRequestAmount(req, item)
-    local possible = { req.count, req.amount, req.quantity, req.qty, req.minCount, req.missing, req.needed,
-        item and item.count, item and item.amount, item and item.quantity, item and item.qty, item and item.minCount }
-    for _, value in ipairs(possible) do
+local function requestAmount(req, item)
+    local values = { req.count, req.amount, req.quantity, req.qty, req.minCount, req.missing, req.needed, item and item.count, item and item.amount, item and item.quantity, item and item.qty, item and item.minCount }
+    for _, value in ipairs(values) do
         local n = tonumber(value)
         if n and n > 0 then return math.floor(n) end
     end
@@ -575,50 +406,35 @@ local function getRequestAmount(req, item)
 end
 
 local function parseRequest(req)
-    if type(req) ~= "table" then return nil, "request was not a table" end
-    local item = findFirstItemTable(req)
+    if type(req) ~= "table" then return nil, "request not table" end
+    local item = firstItemTable(req)
     if not item then return nil, "no item table" end
-    local itemName = item.name or item.item or item.id or item.itemName
-    if type(itemName) ~= "string" or itemName == "" or itemName == "minecraft:air" then return nil, "bad item name" end
+    local name = item.name or item.item or item.id or item.itemName
+    if type(name) ~= "string" or name == "" then return nil, "bad item" end
     return {
         item = item,
-        itemName = itemName,
-        amount = getRequestAmount(req, item),
-        displayName = req.name or req.desc or req.description or item.displayName or itemName,
-        target = req.target or req.building or req.resolver or "Unknown target",
-        id = req.id or req.token or req.name or req.desc or itemName,
-        rawText = requestText(req)
+        itemName = name,
+        amount = requestAmount(req, item),
+        display = req.name or req.desc or req.description or item.displayName or name,
+        target = req.target or req.building or req.resolver or "Unknown",
+        id = req.id or req.token or req.name or req.desc or name
     }, nil
 end
 
-local function shouldSkipRequest(req, parsed)
-    local text = requestText(req)
+local function manualReason(req, parsed)
+    if parsed.item.nbt or parsed.item.tag or parsed.item.fingerprint then return "NBT/special item" end
+    local full = requestText(req)
+    for _, word in ipairs(manualWords) do if string.find(full, word, 1, true) then return "manual: " .. word end end
     local itemName = lower(parsed.itemName)
-    if CONFIG.skipNBT then
-        local item = parsed.item
-        if item.nbt or item.tag or item.fingerprint then return true, "NBT/special item" end
-    end
-    if CONFIG.skipGenericRequests then
-        for _, word in ipairs(genericSkipWords) do
-            if string.find(text, word, 1, true) then return true, "manual: " .. word end
-        end
-    end
-    for _, word in ipairs(itemNameSkipWords) do
-        if string.find(itemName, word, 1, true) then return true, "tool/armor item" end
-    end
-    return false, nil
+    for _, word in ipairs(toolWords) do if string.find(itemName, word, 1, true) then return "tool/armor item" end end
+    return nil
 end
 
--------------------------
--- COLONY
--------------------------
-
-local function getColonyName()
-    local name = safe(function() return colony.getColonyName() end, "Unknown Colony")
-    return tostring(name or "Unknown Colony")
+local function colonyName()
+    return text(safe(function() return colony.getColonyName() end, "Unknown Colony"))
 end
 
-local function getColonyStatus()
+local function colonyStatus()
     return {
         citizens = safe(function() return colony.amountOfCitizens() end, "?"),
         maxCitizens = safe(function() return colony.maxOfCitizens() end, "?"),
@@ -631,581 +447,472 @@ local function getColonyStatus()
 end
 
 local function getRequests()
-    local requests, err = safe(function() return colony.getRequests() end, nil)
-    if type(requests) ~= "table" then return nil, tostring(err or "getRequests returned no table") end
-    return requests, nil
+    local result, err = safe(function() return colony.getRequests() end, nil)
+    if type(result) ~= "table" then return nil, text(err or "getRequests failed") end
+    return result, nil
 end
 
-local function stringifyWorkOrder(order)
-    if type(order) ~= "table" then return tostring(order) end
-    local title = order.name or order.displayName or order.type or order.workOrderType or order.buildingName or order.structurePack or order.id or "Work Order"
-    local level = order.level or order.targetLevel or order.buildLevel or order.currentLevel
-    local state = order.state or order.status or order.priority or order.claimedBy
-    local out = tostring(title)
-    if level then out = out .. " L" .. tostring(level) end
-    if state then out = out .. " - " .. tostring(state) end
-    return out
-end
-
-local function getWorkOrderRows()
+local function workOrderRows()
     local rows = {}
-    local methodNames = { "getWorkOrders", "getWorkorders", "getConstructionSites", "getBuildings" }
-
-    for _, method in ipairs(methodNames) do
-        if hasMethod(colony, method) then
+    for _, method in ipairs({ "getWorkOrders", "getWorkorders", "getConstructionSites", "getBuildings" }) do
+        if has(colony, method) then
             local result = safe(function() return colony[method]() end, nil)
             if type(result) == "table" then
-                for _, order in pairs(result) do
-                    table.insert(rows, "[" .. method .. "] " .. stringifyWorkOrder(order))
-                    if #rows >= 12 then return rows end
+                for _, entry in pairs(result) do
+                    if type(entry) == "table" then
+                        local title = entry.name or entry.displayName or entry.type or entry.workOrderType or entry.buildingName or entry.id or "Work Order"
+                        local level = entry.level or entry.targetLevel or entry.buildLevel or entry.currentLevel
+                        local state = entry.state or entry.status or entry.priority or entry.claimedBy
+                        table.insert(rows, "[" .. method .. "] " .. text(title) .. (level and (" L" .. text(level)) or "") .. (state and (" - " .. text(state)) or ""))
+                    else
+                        table.insert(rows, "[" .. method .. "] " .. text(entry))
+                    end
+                    if #rows >= 16 then return rows end
                 end
                 if #rows > 0 then return rows end
             end
         end
     end
-
     return rows
 end
 
--------------------------
--- APPROVAL / RULES
--------------------------
-
-local recentExports = {}
-local function requestKey(parsed) return tostring(parsed.id) .. "|" .. tostring(parsed.itemName) .. "|" .. tostring(parsed.amount) end
-local function exportOnCooldown(key) local last = recentExports[key]; return last and (nowSeconds() - last < CONFIG.requestCooldownSeconds) end
-local function markExported(key) recentExports[key] = nowSeconds() end
-
-local function addPending(newPending, newOrder, key, parsed, reason)
-    newPending[key] = { parsed = parsed, time = nowSeconds(), reason = reason or "approval" }
-    table.insert(newOrder, key)
+local function citizenRows()
+    local rows = {}
+    for _, method in ipairs({ "getCitizens", "getAllCitizens" }) do
+        if has(colony, method) then
+            local result = safe(function() return colony[method]() end, nil)
+            if type(result) == "table" then
+                for _, citizen in pairs(result) do
+                    if type(citizen) == "table" then
+                        local name = citizen.name or citizen.citizenName or citizen.firstName or citizen.firstname or citizen.id or "Citizen"
+                        if citizen.lastName then name = text(name) .. " " .. text(citizen.lastName) end
+                        local job = citizen.job or citizen.work or citizen.profession or citizen.workBuilding or citizen.workplace or citizen.jobName
+                        local hp = citizen.health or citizen.hp
+                        local maxHp = citizen.maxHealth or citizen.maxHp
+                        local food = citizen.saturation or citizen.food or citizen.hunger
+                        local happy = citizen.happiness or citizen.happy
+                        local state = citizen.state or citizen.status
+                        local line = text(name)
+                        if job then line = line .. " | Job: " .. text(job) end
+                        if hp then line = line .. " | HP: " .. text(hp) .. (maxHp and ("/" .. text(maxHp)) or "") end
+                        if food then line = line .. " | Food: " .. text(food) end
+                        if happy then line = line .. " | Happy: " .. text(happy) end
+                        if state then line = line .. " | " .. text(state) end
+                        table.insert(rows, line)
+                    else
+                        table.insert(rows, text(citizen))
+                    end
+                    if #rows >= 48 then return rows end
+                end
+                if #rows > 0 then return rows end
+            end
+        end
+    end
+    return rows
 end
 
-local function normalizeSelectedPending()
-    if #STATE.pendingOrder <= 0 then STATE.selectedPending = 1; return end
-    if STATE.selectedPending < 1 then STATE.selectedPending = #STATE.pendingOrder end
-    if STATE.selectedPending > #STATE.pendingOrder then STATE.selectedPending = 1 end
+local function requestKey(parsed) return text(parsed.id) .. "|" .. parsed.itemName .. "|" .. parsed.amount end
+local recentExports = {}
+local function onCooldown(key) return recentExports[key] and now() - recentExports[key] < CONFIG.requestCooldownSeconds end
+
+local function addPending(nextPending, nextOrder, key, parsed, reason)
+    nextPending[key] = { parsed = parsed, reason = reason or "approval", time = now() }
+    table.insert(nextOrder, key)
+end
+
+local function normalizeSelected()
+    if #STATE.pendingOrder <= 0 then STATE.selected = 1; return end
+    if STATE.selected < 1 then STATE.selected = #STATE.pendingOrder end
+    if STATE.selected > #STATE.pendingOrder then STATE.selected = 1 end
 end
 
 local function selectedPending()
-    normalizeSelectedPending()
-    local key = STATE.pendingOrder[STATE.selectedPending]
+    normalizeSelected()
+    local key = STATE.pendingOrder[STATE.selected]
     if key then return key, STATE.pending[key] end
     return nil, nil
 end
 
 local function approveSelected(always)
     local key, pending = selectedPending()
-    if not pending then addAction("No pending request to approve"); return end
+    if not pending then action("No pending request"); return end
     STATE.approvedOnce[key] = true
     if always then
         WHITELIST[pending.parsed.itemName] = true
-        BLACKLIST[pending.parsed.itemName] = nil
+        BLOCKED[pending.parsed.itemName] = nil
         saveSet(CONFIG.whitelistFile, WHITELIST)
-        saveSet(CONFIG.blacklistFile, BLACKLIST)
-        addAction("Approved always: " .. pending.parsed.itemName)
+        saveSet(CONFIG.blockedFile, BLOCKED)
+        action("Approved always: " .. pending.parsed.itemName)
     else
-        addAction("Approved once: " .. pending.parsed.itemName)
+        action("Approved once: " .. pending.parsed.itemName)
     end
+    STATE.scanNow = true
 end
 
-local function denySelected(blacklist)
+local function denySelected(block)
     local key, pending = selectedPending()
-    if not pending then addAction("No pending request to deny"); return end
-    STATE.deniedUntil[key] = nowSeconds() + CONFIG.denyCooldownSeconds
-    if blacklist then
-        BLACKLIST[pending.parsed.itemName] = true
+    if not pending then action("No pending request"); return end
+    STATE.deniedUntil[key] = now() + CONFIG.denyCooldownSeconds
+    if block then
+        BLOCKED[pending.parsed.itemName] = true
         WHITELIST[pending.parsed.itemName] = nil
-        saveSet(CONFIG.blacklistFile, BLACKLIST)
+        saveSet(CONFIG.blockedFile, BLOCKED)
         saveSet(CONFIG.whitelistFile, WHITELIST)
-        addAction("Blacklisted: " .. pending.parsed.itemName)
+        action("Blocked: " .. pending.parsed.itemName)
     else
-        addAction("Denied once: " .. pending.parsed.itemName)
+        action("Denied once: " .. pending.parsed.itemName)
+    end
+    STATE.scanNow = true
+end
+
+local function shouldProcess(key, parsed, nextPending, nextOrder, reason)
+    if BLOCKED[parsed.itemName] then return false, "BLOCKED" end
+    if STATE.deniedUntil[key] and STATE.deniedUntil[key] > now() then return false, "DENIED" end
+    if STATE.paused then addPending(nextPending, nextOrder, key, parsed, "paused"); return false, "PENDING" end
+    if STATE.approvedOnce[key] then return true, "APPROVED" end
+    if WHITELIST[parsed.itemName] then return true, "WHITELIST" end
+    if reason then addPending(nextPending, nextOrder, key, parsed, reason); return false, "PENDING" end
+    if STATE.mode == "AUTO" then return true, "AUTO" end
+    if STATE.mode == "WHITELIST" then addPending(nextPending, nextOrder, key, parsed, "not whitelisted"); return false, "PENDING" end
+    addPending(nextPending, nextOrder, key, parsed, "approval mode")
+    return false, "PENDING"
+end
+
+local function addRow(rows, message, color)
+    if #rows < CONFIG.maxRows then table.insert(rows, { text = message, color = color }) end
+end
+
+local function sendRequest(parsed, rows, stats)
+    local key = requestKey(parsed)
+    if onCooldown(key) then
+        stats.waiting = stats.waiting + 1
+        addRow(rows, "[WAIT] " .. parsed.amount .. "x " .. trim(parsed.itemName, 50), colors.gray)
+        return
+    end
+    if aeCount(parsed.itemName) > 0 then
+        local moved, err = exportItem(parsed.itemName, parsed.amount)
+        if moved > 0 then
+            recentExports[key] = now()
+            STATE.approvedOnce[key] = nil
+            stats.sent = stats.sent + 1
+            STATE.sent = STATE.sent + moved
+            addRow(rows, "[SENT] " .. moved .. "/" .. parsed.amount .. "x " .. trim(parsed.itemName, 44), colors.lime)
+            action("Sent " .. moved .. "x " .. parsed.itemName)
+            return
+        end
+    end
+    local crafted, msg = craftItem(parsed.itemName, parsed.amount)
+    if crafted then
+        STATE.approvedOnce[key] = nil
+        stats.crafting = stats.crafting + 1
+        STATE.craft = STATE.craft + 1
+        addRow(rows, "[CRAFT] " .. parsed.amount .. "x " .. trim(parsed.itemName, 47), colors.yellow)
+        action("Crafting " .. parsed.amount .. "x " .. parsed.itemName)
+    else
+        stats.missing = stats.missing + 1
+        STATE.missing = STATE.missing + 1
+        addRow(rows, "[MISS] " .. parsed.amount .. "x " .. trim(parsed.itemName, 48), colors.red)
+        action("Missing " .. parsed.itemName .. " - " .. trim(msg, 30))
     end
 end
 
-local function nextPending(delta)
-    if #STATE.pendingOrder <= 0 then return end
-    STATE.selectedPending = STATE.selectedPending + delta
-    normalizeSelectedPending()
-    saveModeAndPage()
+local function buildRows(parsedRequests)
+    local totals = {}
+    for _, parsed in ipairs(parsedRequests) do totals[parsed.itemName] = (totals[parsed.itemName] or 0) + (tonumber(parsed.amount) or 1) end
+    local rows = {}
+    for item, amount in pairs(totals) do table.insert(rows, amount .. "x " .. item) end
+    table.sort(rows)
+    return rows
 end
 
--------------------------
--- DRAWING
--------------------------
+local function scan()
+    STATE.scans = STATE.scans + 1
+    STATE.colonyName = colonyName()
+    STATE.status = colonyStatus()
+    STATE.workRows = workOrderRows()
+    STATE.citizenRows = citizenRows()
+    local stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 }
+    local rows, parsedList, nextPending, nextOrder = {}, {}, {}, {}
+    local reqs, err = getRequests()
+    if not reqs then
+        stats.bad = 1
+        addRow(rows, "[ERROR] " .. err, colors.red)
+        append(CONFIG.errorFile, err)
+        STATE.stats = stats
+        STATE.rows = rows
+        return
+    end
+    for _, req in pairs(reqs) do
+        stats.total = stats.total + 1
+        local parsed, parseErr = parseRequest(req)
+        if not parsed then
+            stats.bad = stats.bad + 1
+            append(CONFIG.errorFile, "Bad request: " .. text(parseErr))
+        else
+            table.insert(parsedList, parsed)
+            local reason = manualReason(req, parsed)
+            local key = requestKey(parsed)
+            local allowed, status = shouldProcess(key, parsed, nextPending, nextOrder, reason)
+            if allowed then
+                sendRequest(parsed, rows, stats)
+            elseif status == "PENDING" then
+                stats.pending = stats.pending + 1
+                stats.waiting = stats.waiting + 1
+                local why = nextPending[key] and nextPending[key].reason or "pending"
+                addRow(rows, "[PENDING] " .. parsed.amount .. "x " .. trim(parsed.itemName, 39) .. " (" .. trim(why, 14) .. ")", colors.yellow)
+            elseif status == "BLOCKED" then
+                stats.skipped = stats.skipped + 1
+                addRow(rows, "[BLOCKED] " .. parsed.amount .. "x " .. trim(parsed.itemName, 45), colors.red)
+            else
+                stats.waiting = stats.waiting + 1
+                addRow(rows, "[DENIED] " .. parsed.amount .. "x " .. trim(parsed.itemName, 45), colors.orange)
+            end
+        end
+    end
+    STATE.pending = nextPending
+    STATE.pendingOrder = nextOrder
+    normalizeSelected()
+    STATE.stats = stats
+    STATE.rows = rows
+    STATE.buildRows = buildRows(parsedList)
+    if stats.total == 0 then action("No colony requests") end
+end
 
-local function drawHeader(countdown)
-    local w, h = term.getSize()
-    local flash = STATE.status.underAttack and (nowSeconds() % 2 == 0)
-    local lineColor = flash and colors.red or colors.gray
+local function header(countdown)
+    local w = term.getSize()
+    local lineColor = STATE.status.underAttack and (now() % 2 == 0 and colors.red or colors.gray) or colors.gray
     fillAt(1, 1, w, "=", lineColor)
-    if STATE.status.underAttack then centerAt(1, " !!! COLONY UNDER ATTACK !!! ", colors.red) else centerAt(1, " HackThePlanet Colony Supply ", colors.lime) end
-    local pausedText = STATE.paused and " | PAUSED" or ""
-    centerAt(2, "AE2 -> MineColonies Auto-Supply" .. pausedText .. " | Next Scan: " .. tostring(countdown) .. "s", STATE.paused and colors.orange or colors.cyan)
+    center(1, STATE.status.underAttack and " !!! COLONY UNDER ATTACK !!! " or " HackThePlanet Colony Supply ", STATE.status.underAttack and colors.red or colors.lime)
+    center(2, "AE2 -> MineColonies Auto-Supply" .. (STATE.paused and " | PAUSED" or "") .. " | Next Scan: " .. countdown .. "s", STATE.paused and colors.orange or colors.cyan)
     fillAt(1, 3, w, "=", lineColor)
 end
 
-local function drawRequestRows(x, y, width, height, rows)
+local function rowsAt(x, y, w, h, rows, empty)
     if #rows == 0 then
-        centerAt(y + 2, "No open colony requests right now.", colors.lime)
-        centerAt(y + 3, "System idle. Waiting for MineColonies.", colors.gray)
+        writeAt(x, y, empty or "Nothing to show.", colors.gray)
         return
     end
     for i, row in ipairs(rows) do
-        if i > height then break end
-        writeAt(x, y + i - 1, trimText(row.text, width), row.color)
+        if i > h then break end
+        writeAt(x, y + i - 1, trim(row.text or row, w), row.color or colors.white)
     end
 end
 
-local function drawSmallDashboard(countdown)
-    clearScreen()
-    drawHeader(countdown)
-    local s = STATE.status
-    writeAt(1, 4, "Colony: " .. STATE.colonyName, colors.yellow)
-    writeAt(1, 5, "Status: " .. (s.underAttack and "UNDER ATTACK" or "Safe"), s.underAttack and colors.red or colors.lime)
-    writeAt(1, 6, "Mode: " .. STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or colors.yellow)
-    writeAt(1, 7, "Citizens: " .. tostring(s.citizens) .. " / " .. tostring(s.maxCitizens), colors.white)
-    writeAt(1, 8, "Happiness: " .. formatNumber(s.happiness, 2), colors.white)
-    writeAt(1, 9, "Output: ME Bridge/" .. CONFIG.outputTarget, colors.gray)
-    writeAt(1, 10, "Page: " .. STATE.page, colors.gray)
-    drawRequestRows(1, 12, select(1, term.getSize()), select(2, term.getSize()) - 16, STATE.requestRows)
-    local h = select(2, term.getSize())
-    writeAt(1, h - 3, "Req: " .. STATE.stats.total .. " Pending: " .. STATE.stats.pending, colors.white)
-    writeAt(1, h - 2, "Sent: " .. STATE.stats.sent .. " Craft: " .. STATE.stats.crafting, colors.green)
-    writeAt(1, h - 1, "Missing: " .. STATE.stats.missing .. " Bad: " .. STATE.stats.bad, colors.red)
-end
-
-local function drawDashboardPage(countdown)
+local function dashboard(countdown)
     local w, h = term.getSize()
-    local leftW = math.max(28, math.floor(w * 0.52))
-    local rightW = w - leftW - 1
-    if rightW < 24 or h < 20 then drawSmallDashboard(countdown); return end
-
-    clearScreen()
-    drawHeader(countdown)
-    local boxColor = STATE.status.underAttack and colors.red or colors.gray
-    drawBox(1, 5, leftW, 9, " Colony Status ", boxColor)
-    drawBox(leftW + 2, 5, rightW, 9, " System Status ", boxColor)
-
-    local s = STATE.status
-    writeAt(3, 6, "Colony:", colors.yellow); writeAt(12, 6, trimText(STATE.colonyName, leftW - 13), colors.white)
-    writeAt(3, 7, "Status:", colors.yellow); writeAt(12, 7, s.underAttack and "UNDER ATTACK" or "Safe", s.underAttack and colors.red or colors.lime)
-    writeAt(3, 8, "Citizens:", colors.yellow); writeAt(13, 8, tostring(s.citizens) .. " / " .. tostring(s.maxCitizens), colors.white)
-    writeAt(3, 9, "Happy:", colors.yellow); writeAt(11, 9, formatNumber(s.happiness, 2), colors.white)
-    writeAt(3, 10, "Active:", colors.yellow); writeAt(11, 10, s.active == nil and "Unknown" or (s.active and "Yes" or "No"), s.active == true and colors.lime or colors.gray)
-    writeAt(3, 11, "Builds:", colors.yellow); writeAt(11, 11, tostring(s.constructionSites), colors.white)
-    writeAt(3, 12, "Graves:", colors.yellow); writeAt(11, 12, tostring(s.graves), tonumber(s.graves) and tonumber(s.graves) > 0 and colors.red or colors.white)
-
-    local rx = leftW + 4
-    writeAt(rx, 6, "Mode:", colors.yellow); writeAt(rx + 7, 6, STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or (STATE.mode == "AUTO" and colors.lime or colors.yellow))
-    writeAt(rx, 7, "Output:", colors.yellow); writeAt(rx + 9, 7, "ME Bridge/" .. CONFIG.outputTarget, colors.white)
-    writeAt(rx, 8, "Uptime:", colors.yellow); writeAt(rx + 9, 8, formatTime(nowSeconds() - STATE.started), colors.white)
-    writeAt(rx, 9, "Scans:", colors.yellow); writeAt(rx + 9, 9, tostring(STATE.scans), colors.white)
-    writeAt(rx, 10, "Pending:", colors.yellow); writeAt(rx + 10, 10, tostring(#STATE.pendingOrder), #STATE.pendingOrder > 0 and colors.yellow or colors.gray)
-    writeAt(rx, 11, "Session Sent:", colors.yellow); writeAt(rx + 14, 11, tostring(STATE.sent), colors.green)
-    writeAt(rx, 12, "Last:", colors.yellow); writeAt(rx + 7, 12, trimText(STATE.lastAction, rightW - 10), colors.white)
-
+    clear()
+    header(countdown)
+    if w < 70 or h < 20 then
+        writeAt(1, 4, "Colony: " .. STATE.colonyName, colors.yellow)
+        writeAt(1, 5, "Mode: " .. STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or colors.yellow)
+        writeAt(1, 6, "Citizens: " .. text(STATE.status.citizens) .. " / " .. text(STATE.status.maxCitizens), colors.white)
+        writeAt(1, 7, "Happiness: " .. fmtNum(STATE.status.happiness, 2), colors.white)
+        rowsAt(1, 9, w, h - 12, STATE.rows, "No requests.")
+        return
+    end
+    local left = math.floor(w * 0.52)
+    local right = w - left - 1
+    box(1, 5, left, 9, " Colony Status ", STATE.status.underAttack and colors.red or colors.gray)
+    box(left + 2, 5, right, 9, " System Status ", STATE.status.underAttack and colors.red or colors.gray)
+    writeAt(3, 6, "Colony:", colors.yellow); writeAt(12, 6, trim(STATE.colonyName, left - 13))
+    writeAt(3, 7, "Status:", colors.yellow); writeAt(12, 7, STATE.status.underAttack and "UNDER ATTACK" or "Safe", STATE.status.underAttack and colors.red or colors.lime)
+    writeAt(3, 8, "Citizens:", colors.yellow); writeAt(13, 8, text(STATE.status.citizens) .. " / " .. text(STATE.status.maxCitizens))
+    writeAt(3, 9, "Happy:", colors.yellow); writeAt(11, 9, fmtNum(STATE.status.happiness, 2))
+    writeAt(3, 10, "Builds:", colors.yellow); writeAt(11, 10, text(STATE.status.constructionSites))
+    writeAt(3, 11, "Graves:", colors.yellow); writeAt(11, 11, text(STATE.status.graves), tonumber(STATE.status.graves) and tonumber(STATE.status.graves) > 0 and colors.red or colors.white)
+    local rx = left + 4
+    writeAt(rx, 6, "Mode:", colors.yellow); writeAt(rx + 7, 6, STATE.mode .. (STATE.paused and " PAUSED" or ""), STATE.paused and colors.orange or colors.lime)
+    writeAt(rx, 7, "Output:", colors.yellow); writeAt(rx + 9, 7, "ME Bridge/" .. CONFIG.outputTarget)
+    writeAt(rx, 8, "Uptime:", colors.yellow); writeAt(rx + 9, 8, fmtTime(now() - STATE.started))
+    writeAt(rx, 9, "Scans:", colors.yellow); writeAt(rx + 9, 9, text(STATE.scans))
+    writeAt(rx, 10, "Pending:", colors.yellow); writeAt(rx + 10, 10, text(#STATE.pendingOrder), #STATE.pendingOrder > 0 and colors.yellow or colors.gray)
+    writeAt(rx, 11, "Last:", colors.yellow); writeAt(rx + 7, 11, trim(STATE.lastAction, right - 10))
     local reqY = 15
     local reqH = math.max(8, h - reqY - 6)
-    drawBox(1, reqY, w, reqH, " Current Requests ", boxColor)
-    drawRequestRows(3, reqY + 1, w - 4, reqH - 2, STATE.requestRows)
-
-    local footerY = reqY + reqH + 1
-    if footerY + 4 <= h then
-        drawBox(1, footerY, leftW, 5, " Scan Summary ", colors.gray)
-        drawBox(leftW + 2, footerY, rightW, 5, " Recent Actions ", colors.gray)
-        writeAt(3, footerY + 1, "Requests: " .. tostring(STATE.stats.total) .. "  Pending: " .. tostring(STATE.stats.pending), colors.white)
-        writeAt(3, footerY + 2, "Sent: " .. tostring(STATE.stats.sent) .. "  Craft: " .. tostring(STATE.stats.crafting), colors.green)
-        writeAt(3, footerY + 3, "Wait: " .. tostring(STATE.stats.waiting) .. "  Manual: " .. tostring(STATE.stats.skipped), colors.gray)
-        writeAt(3, footerY + 4, "Missing: " .. tostring(STATE.stats.missing) .. "  Bad: " .. tostring(STATE.stats.bad), colors.red)
-        for i = 1, math.min(3, #STATE.actions) do writeAt(leftW + 4, footerY + i, trimText(STATE.actions[i], rightW - 4), colors.white) end
+    box(1, reqY, w, reqH, " Current Requests ", colors.gray)
+    rowsAt(3, reqY + 1, w - 4, reqH - 2, STATE.rows, "No open colony requests.")
+    local foot = reqY + reqH + 1
+    if foot + 4 <= h then
+        box(1, foot, left, 5, " Scan Summary ", colors.gray)
+        box(left + 2, foot, right, 5, " Recent Actions ", colors.gray)
+        writeAt(3, foot + 1, "Requests: " .. STATE.stats.total .. "  Pending: " .. STATE.stats.pending)
+        writeAt(3, foot + 2, "Sent: " .. STATE.stats.sent .. "  Craft: " .. STATE.stats.crafting, colors.green)
+        writeAt(3, foot + 3, "Wait: " .. STATE.stats.waiting .. "  Manual: " .. STATE.stats.skipped, colors.gray)
+        writeAt(3, foot + 4, "Missing: " .. STATE.stats.missing .. "  Bad: " .. STATE.stats.bad, colors.red)
+        rowsAt(left + 4, foot + 1, right - 4, 3, STATE.actions, "")
     end
 end
 
-local function drawRequestsPage(countdown)
-    clearScreen(); drawHeader(countdown)
+local function simplePage(countdown, title, rows, empty)
     local w, h = term.getSize()
-    drawBox(1, 5, w, h - 5, " Request Details ", colors.gray)
-    writeAt(3, 6, "Mode: " .. STATE.mode .. " | Pending: " .. tostring(#STATE.pendingOrder) .. " | Safe requests are the build-material automation", colors.yellow)
-    drawRequestRows(3, 8, w - 4, h - 9, STATE.requestRows)
+    clear(); header(countdown); box(1, 5, w, h - 5, title, colors.gray)
+    rowsAt(3, 7, w - 4, h - 8, rows, empty)
 end
 
-local function drawBuildPage(countdown)
-    clearScreen(); drawHeader(countdown)
+local function buildPage(countdown)
     local w, h = term.getSize()
+    clear(); header(countdown)
     local half = math.floor((w - 3) / 2)
-    drawBox(1, 5, half, h - 5, " Build Material Totals ", colors.gray)
-    drawBox(half + 2, 5, w - half - 1, h - 5, " Work Orders / Sites ", colors.gray)
-
+    box(1, 5, half, h - 5, " Build Material Totals ", colors.gray)
+    box(half + 2, 5, w - half - 1, h - 5, " Work Orders / Sites ", colors.gray)
     if #STATE.buildRows == 0 then
         writeAt(3, 7, "No material requests found.", colors.lime)
-    else
-        local y = 6
-        for _, row in ipairs(STATE.buildRows) do
-            y = y + 1
-            if y > h - 2 then break end
-            writeAt(3, y, trimText(row, half - 4), colors.white)
+        if #STATE.workRows > 0 or (tonumber(STATE.status.constructionSites) and tonumber(STATE.status.constructionSites) > 0) then
+            writeAt(3, 9, "Work order found. Waiting for", colors.yellow)
+            writeAt(3, 10, "MineColonies to ask for materials.", colors.yellow)
         end
-    end
-
-    if #STATE.workOrderRows == 0 then
-        writeAt(half + 4, 7, "Construction Sites: " .. tostring(STATE.status.constructionSites), colors.white)
-        writeAt(half + 4, 8, "No detailed work-order method found.", colors.gray)
-        writeAt(half + 4, 10, "MineColonies requests are used as", colors.gray)
-        writeAt(half + 4, 11, "the build material source.", colors.gray)
     else
-        local y = 6
-        for _, row in ipairs(STATE.workOrderRows) do
-            y = y + 1
-            if y > h - 2 then break end
-            writeAt(half + 4, y, trimText(row, w - half - 5), colors.white)
-        end
+        rowsAt(3, 7, half - 4, h - 8, STATE.buildRows, "")
     end
+    rowsAt(half + 4, 7, w - half - 5, h - 8, STATE.workRows, "Construction Sites: " .. text(STATE.status.constructionSites))
 end
 
-local function drawPendingPage(countdown)
-    clearScreen(); drawHeader(countdown)
-    local w, h = term.getSize()
-    drawBox(1, 5, w, h - 5, " Pending Approval ", colors.gray)
-    if #STATE.pendingOrder == 0 then centerAt(8, "No pending approvals.", colors.lime); return end
-    local y = 7
+local function citizensPage(countdown)
+    local rows = {}
+    table.insert(rows, "Citizens: " .. text(STATE.status.citizens) .. " / " .. text(STATE.status.maxCitizens) .. " | Colony Happiness: " .. fmtNum(STATE.status.happiness, 2))
+    table.insert(rows, "")
+    if #STATE.citizenRows == 0 then
+        table.insert(rows, "No detailed citizen list exposed by this Colony Integrator.")
+        table.insert(rows, "Counts/happiness still work on the dashboard.")
+    else
+        for _, row in ipairs(STATE.citizenRows) do table.insert(rows, row) end
+    end
+    simplePage(countdown, " Citizens / Villagers ", rows, "No citizen data.")
+end
+
+local function pendingPage(countdown)
+    local rows = {}
     for i, key in ipairs(STATE.pendingOrder) do
-        local p = STATE.pending[key]
-        if p then
-            local prefix = i == STATE.selectedPending and "> " or "  "
-            local msg = prefix .. tostring(i) .. "/" .. tostring(#STATE.pendingOrder) .. " " .. tostring(p.parsed.amount) .. "x " .. p.parsed.itemName .. " (" .. tostring(p.reason) .. ")"
-            writeAt(3, y, trimText(msg, w - 6), i == STATE.selectedPending and colors.yellow or colors.white)
-            y = y + 1
-            if y > h - 2 then break end
+        local pending = STATE.pending[key]
+        if pending then
+            table.insert(rows, (i == STATE.selected and "> " or "  ") .. i .. "/" .. #STATE.pendingOrder .. " " .. pending.parsed.amount .. "x " .. pending.parsed.itemName .. " (" .. pending.reason .. ")")
         end
     end
+    simplePage(countdown, " Pending Approval ", rows, "No pending approvals.")
 end
 
-local function drawHistoryPage(countdown)
-    clearScreen(); drawHeader(countdown)
-    local w, h = term.getSize()
-    drawBox(1, 5, w, h - 5, " History ", colors.gray)
-    local lines = readLines(CONFIG.historyFile, CONFIG.maxHistoryLines)
-    local y = 6
-    local maxVisible = h - 7
-    local start = math.max(1, #lines - maxVisible + 1)
-    for i = start, #lines do
-        if lines[i] then writeAt(3, y, trimText(lines[i], w - 4), colors.white); y = y + 1 end
-    end
-    if #lines == 0 then centerAt(8, "No history yet.", colors.gray) end
+local function settingsPage(countdown)
+    local wc, bc = 0, 0
+    for _ in pairs(WHITELIST) do wc = wc + 1 end
+    for _ in pairs(BLOCKED) do bc = bc + 1 end
+    simplePage(countdown, " Settings / Rules ", {
+        "Mode: " .. STATE.mode,
+        "Paused: " .. text(STATE.paused),
+        "Output Target: " .. CONFIG.outputTarget,
+        "Whitelist Items: " .. wc,
+        "Blocked Items: " .. bc,
+        "",
+        "AUTO      = safe requests send unless blocked",
+        "APPROVAL  = requests wait for approval",
+        "WHITELIST = only ALWAYS-approved items send"
+    }, "No settings.")
 end
 
-local function drawSettingsPage(countdown)
-    clearScreen(); drawHeader(countdown)
-    local w, h = term.getSize()
-    drawBox(1, 5, w, h - 5, " Settings / Rules ", colors.gray)
-    local whitelistCount, blacklistCount, protectedCount = 0, 0, 0
-    for _ in pairs(WHITELIST) do whitelistCount = whitelistCount + 1 end
-    for _ in pairs(BLACKLIST) do blacklistCount = blacklistCount + 1 end
-    for _ in pairs(PROTECTED) do protectedCount = protectedCount + 1 end
-    writeAt(3, 7, "Mode: " .. STATE.mode, colors.yellow)
-    writeAt(3, 8, "Paused: " .. tostring(STATE.paused), STATE.paused and colors.orange or colors.white)
-    writeAt(3, 9, "Output Target: " .. CONFIG.outputTarget, colors.white)
-    writeAt(3, 10, "Whitelist Items: " .. tostring(whitelistCount), colors.lime)
-    writeAt(3, 11, "Blacklist Items: " .. tostring(blacklistCount), colors.red)
-    writeAt(3, 12, "Protected Items: " .. tostring(protectedCount), colors.yellow)
-    writeAt(3, 14, "AUTO      = safe requests send unless blacklisted/protected", colors.white)
-    writeAt(3, 15, "APPROVAL  = requests wait for approval", colors.white)
-    writeAt(3, 16, "WHITELIST = only ALWAYS-approved items send", colors.white)
-    writeAt(3, 18, "Protected items always require approval unless ALWAYS-approved.", colors.gray)
+local function historyPage(countdown)
+    simplePage(countdown, " History ", readLines(CONFIG.historyFile, CONFIG.maxHistoryLines), "No history yet.")
 end
 
 local function drawMain(countdown)
     withScreen(MAIN, function()
-        if STATE.page == "REQUESTS" then drawRequestsPage(countdown)
-        elseif STATE.page == "BUILD" then drawBuildPage(countdown)
-        elseif STATE.page == "PENDING" then drawPendingPage(countdown)
-        elseif STATE.page == "HISTORY" then drawHistoryPage(countdown)
-        elseif STATE.page == "SETTINGS" then drawSettingsPage(countdown)
-        else drawDashboardPage(countdown) end
+        if STATE.page == "REQUESTS" then simplePage(countdown, " Request Details ", STATE.rows, "No requests.")
+        elseif STATE.page == "BUILD" then buildPage(countdown)
+        elseif STATE.page == "CITIZENS" then citizensPage(countdown)
+        elseif STATE.page == "PENDING" then pendingPage(countdown)
+        elseif STATE.page == "HISTORY" then historyPage(countdown)
+        elseif STATE.page == "SETTINGS" then settingsPage(countdown)
+        else dashboard(countdown) end
     end)
-end
-
-local function controlButton(x, y, w, label, action, active)
-    addButton(CONTROL.name, x, y, w, 2, label, action, active and colors.lime or colors.gray)
 end
 
 local function drawControl(countdown)
     if not CONTROL then return end
     withScreen(CONTROL, function()
-        clearScreen()
+        clear()
         local w, h = term.getSize()
-        centerAt(1, "HTP CONTROL PANEL", colors.lime)
-        centerAt(2, "Next Scan: " .. tostring(countdown) .. "s", colors.cyan)
+        center(1, "HTP CONTROL PANEL", colors.lime)
+        center(2, "Next Scan: " .. countdown .. "s", colors.cyan)
         fillAt(1, 3, w, "=", STATE.status.underAttack and colors.red or colors.gray)
-
         local colW = math.max(6, math.floor((w - 4) / 3))
-        controlButton(2, 4, colW, "AUTO", function() setMode("AUTO") end, STATE.mode == "AUTO")
-        controlButton(3 + colW, 4, colW, "APPROVAL", function() setMode("APPROVAL") end, STATE.mode == "APPROVAL")
-        controlButton(4 + colW * 2, 4, colW, "WHITE", function() setMode("WHITELIST") end, STATE.mode == "WHITELIST")
-
-        controlButton(2, 7, colW, "DASH", function() setPage("DASHBOARD") end, STATE.page == "DASHBOARD")
-        controlButton(3 + colW, 7, colW, "REQ", function() setPage("REQUESTS") end, STATE.page == "REQUESTS")
-        controlButton(4 + colW * 2, 7, colW, "BUILD", function() setPage("BUILD") end, STATE.page == "BUILD")
-
-        controlButton(2, 10, colW, "PENDING", function() setPage("PENDING") end, STATE.page == "PENDING")
-        controlButton(3 + colW, 10, colW, "HISTORY", function() setPage("HISTORY") end, STATE.page == "HISTORY")
-        controlButton(4 + colW * 2, 10, colW, "SETTINGS", function() setPage("SETTINGS") end, STATE.page == "SETTINGS")
-
-        controlButton(2, 13, colW, STATE.paused and "RESUME" or "PAUSE", function() setPaused(not STATE.paused) end, STATE.paused)
-        controlButton(3 + colW, 13, colW, "SCAN NOW", function() STATE.nextScanNow = true; addAction("Manual scan queued") end, false)
-        controlButton(4 + colW * 2, 13, colW, "CLR HIST", function() clearHistory() end, false)
-
+        local function cb(col, row, label, fn, active, color)
+            button(CONTROL.name, 2 + ((col - 1) * (colW + 1)), row, colW, 2, label, fn, active and colors.lime or (color or colors.gray))
+        end
+        cb(1, 4, "AUTO", function() setMode("AUTO") end, STATE.mode == "AUTO")
+        cb(2, 4, "APPROVAL", function() setMode("APPROVAL") end, STATE.mode == "APPROVAL")
+        cb(3, 4, "WHITE", function() setMode("WHITELIST") end, STATE.mode == "WHITELIST")
+        cb(1, 7, "DASH", function() setPage("DASHBOARD") end, STATE.page == "DASHBOARD")
+        cb(2, 7, "REQ", function() setPage("REQUESTS") end, STATE.page == "REQUESTS")
+        cb(3, 7, "BUILD", function() setPage("BUILD") end, STATE.page == "BUILD")
+        cb(1, 10, "CITIZENS", function() setPage("CITIZENS") end, STATE.page == "CITIZENS")
+        cb(2, 10, "PENDING", function() setPage("PENDING") end, STATE.page == "PENDING")
+        cb(3, 10, "HISTORY", function() setPage("HISTORY") end, STATE.page == "HISTORY")
+        cb(1, 13, "SETTINGS", function() setPage("SETTINGS") end, STATE.page == "SETTINGS")
+        cb(2, 13, STATE.paused and "RESUME" or "PAUSE", function() setPaused(not STATE.paused) end, STATE.paused)
+        cb(3, 13, "SCAN", function() STATE.scanNow = true; action("Manual scan queued") end, false)
         local y = 16
         local key, pending = selectedPending()
         if pending then
-            writeAt(2, y, "Pending " .. tostring(STATE.selectedPending) .. "/" .. tostring(#STATE.pendingOrder) .. ": " .. trimText(pending.parsed.amount .. "x " .. pending.parsed.itemName, w - 18), colors.yellow)
-            writeAt(2, y + 1, "Reason: " .. trimText(pending.reason, w - 10), colors.gray)
-
+            writeAt(2, y, "Pending " .. STATE.selected .. "/" .. #STATE.pendingOrder .. ": " .. trim(pending.parsed.amount .. "x " .. pending.parsed.itemName, w - 18), colors.yellow)
+            writeAt(2, y + 1, "Reason: " .. trim(pending.reason, w - 10), colors.gray)
             local half = math.max(8, math.floor((w - 5) / 2))
-            addButton(CONTROL.name, 2, y + 3, half, 2, "PREV", function() nextPending(-1) end, colors.gray)
-            addButton(CONTROL.name, 3 + half, y + 3, half, 2, "NEXT", function() nextPending(1) end, colors.gray)
-            addButton(CONTROL.name, 2, y + 6, half, 2, "APPROVE", function() approveSelected(false); STATE.nextScanNow = true end, colors.lime)
-            addButton(CONTROL.name, 3 + half, y + 6, half, 2, "ALWAYS", function() approveSelected(true); STATE.nextScanNow = true end, colors.green)
-            addButton(CONTROL.name, 2, y + 9, half, 2, "DENY", function() denySelected(false); STATE.nextScanNow = true end, colors.orange)
-            addButton(CONTROL.name, 3 + half, y + 9, half, 2, "BLACKLIST", function() denySelected(true); STATE.nextScanNow = true end, colors.red)
+            button(CONTROL.name, 2, y + 3, half, 2, "PREV", function() STATE.selected = STATE.selected - 1; normalizeSelected(); saveState() end, colors.gray)
+            button(CONTROL.name, 3 + half, y + 3, half, 2, "NEXT", function() STATE.selected = STATE.selected + 1; normalizeSelected(); saveState() end, colors.gray)
+            button(CONTROL.name, 2, y + 6, half, 2, "APPROVE", function() approveSelected(false) end, colors.lime)
+            button(CONTROL.name, 3 + half, y + 6, half, 2, "ALWAYS", function() approveSelected(true) end, colors.green)
+            button(CONTROL.name, 2, y + 9, half, 2, "DENY", function() denySelected(false) end, colors.orange)
+            button(CONTROL.name, 3 + half, y + 9, half, 2, "BLOCK", function() denySelected(true) end, colors.red)
         else
-            centerAt(y + 2, "No pending approvals", colors.gray)
-            centerAt(y + 4, "Switch to APPROVAL mode to review all requests.", colors.gray)
+            center(y + 2, "No pending approvals", colors.gray)
         end
-
-        if STATE.status.underAttack then centerAt(h - 1, "!!! COLONY UNDER ATTACK !!!", colors.red) else centerAt(h - 1, "AE2 LINKED | COLONY LINKED", colors.gray) end
+        if h >= 30 then button(CONTROL.name, 2, h - 3, math.max(10, w - 4), 2, "CLEAR HISTORY", function() clearHistory() end, colors.gray) end
+        center(h - 1, STATE.status.underAttack and "!!! COLONY UNDER ATTACK !!!" or "AE2 LINKED | COLONY LINKED", STATE.status.underAttack and colors.red or colors.gray)
     end)
 end
 
-local function renderAll(countdown)
+local function render(countdown)
     BUTTONS = {}
-    local ok, err = pcall(function()
-        drawMain(countdown)
-        drawControl(countdown)
-    end)
-    if not ok then
+    local okRender, err = pcall(function() drawMain(countdown); drawControl(countdown) end)
+    if not okRender then
         term.redirect(nativeTerm)
-        clearScreen()
+        clear()
         print("Render error:")
         print(err)
-        logError("Render error: " .. tostring(err))
+        append(CONFIG.errorFile, "Render error: " .. text(err))
     end
 end
-
--------------------------
--- SCAN
--------------------------
-
-local function addRequestRow(rows, text, color)
-    if #rows < CONFIG.maxShownRequests then table.insert(rows, { text = text, color = color }) end
-end
-
-local function buildMaterialRows(parsedList)
-    local totals = {}
-    for _, parsed in ipairs(parsedList) do
-        totals[parsed.itemName] = (totals[parsed.itemName] or 0) + (tonumber(parsed.amount) or 1)
-    end
-    local rows = {}
-    for item, amount in pairs(totals) do table.insert(rows, tostring(amount) .. "x " .. item) end
-    table.sort(rows)
-    while #rows > CONFIG.maxBuildRows do table.remove(rows) end
-    return rows
-end
-
-local function shouldProcessRequest(key, parsed, newPending, newOrder, skipReason)
-    if BLACKLIST[parsed.itemName] then return false, "BLACKLISTED" end
-    if STATE.deniedUntil[key] and STATE.deniedUntil[key] > nowSeconds() then return false, "DENIED" end
-    if STATE.paused then addPending(newPending, newOrder, key, parsed, "paused"); return false, "PENDING" end
-    if STATE.approvedOnce[key] then return true, "APPROVED" end
-    if WHITELIST[parsed.itemName] then return true, "WHITELIST" end
-    if skipReason then addPending(newPending, newOrder, key, parsed, skipReason); return false, "PENDING" end
-    if PROTECTED[parsed.itemName] then addPending(newPending, newOrder, key, parsed, "protected item"); return false, "PENDING" end
-    if STATE.mode == "AUTO" then return true, "AUTO" end
-    if STATE.mode == "WHITELIST" then addPending(newPending, newOrder, key, parsed, "not whitelisted"); return false, "PENDING" end
-    addPending(newPending, newOrder, key, parsed, "approval mode")
-    return false, "PENDING"
-end
-
-local function processParsedRequest(parsed, rows, stats)
-    local key = requestKey(parsed)
-    if exportOnCooldown(key) then
-        stats.waiting = stats.waiting + 1
-        addRequestRow(rows, "[WAIT] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 50), colors.gray)
-        return
-    end
-
-    local available = getAECount(parsed.itemName)
-    if available > 0 then
-        local moved, exportErr = exportAEItem(parsed.itemName, parsed.amount)
-        if moved > 0 then
-            stats.sent = stats.sent + 1
-            STATE.sent = STATE.sent + moved
-            STATE.approvedOnce[key] = nil
-            markExported(key)
-            addRequestRow(rows, "[SENT] " .. tostring(moved) .. "/" .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 44), colors.lime)
-            addAction("Sent " .. tostring(moved) .. "x " .. parsed.itemName)
-            logInfo("SENT " .. tostring(moved) .. "/" .. tostring(parsed.amount) .. " " .. parsed.itemName .. " -> " .. tostring(parsed.target))
-            return
-        end
-        local craftOk, craftMsg = requestAECraft(parsed.itemName, parsed.amount)
-        if craftOk then
-            stats.crafting = stats.crafting + 1
-            STATE.crafting = STATE.crafting + 1
-            STATE.approvedOnce[key] = nil
-            addRequestRow(rows, "[CRAFT] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 47), colors.yellow)
-            addAction("Crafting " .. tostring(parsed.amount) .. "x " .. parsed.itemName)
-            logInfo("CRAFT " .. tostring(parsed.amount) .. " " .. parsed.itemName .. " - " .. tostring(craftMsg))
-        else
-            stats.missing = stats.missing + 1
-            STATE.missing = STATE.missing + 1
-            addRequestRow(rows, "[MISS] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 48), colors.red)
-            addAction("Missing " .. parsed.itemName)
-            logInfo("MISS " .. tostring(parsed.amount) .. " " .. parsed.itemName .. " - " .. tostring(exportErr or craftMsg))
-        end
-    else
-        local craftOk, craftMsg = requestAECraft(parsed.itemName, parsed.amount)
-        if craftOk then
-            stats.crafting = stats.crafting + 1
-            STATE.crafting = STATE.crafting + 1
-            STATE.approvedOnce[key] = nil
-            addRequestRow(rows, "[CRAFT] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 47), colors.yellow)
-            addAction("Crafting " .. tostring(parsed.amount) .. "x " .. parsed.itemName)
-            logInfo("CRAFT " .. tostring(parsed.amount) .. " " .. parsed.itemName .. " - " .. tostring(craftMsg))
-        else
-            stats.missing = stats.missing + 1
-            STATE.missing = STATE.missing + 1
-            addRequestRow(rows, "[MISS] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 48), colors.red)
-            addAction("Missing " .. parsed.itemName)
-            logInfo("MISS " .. tostring(parsed.amount) .. " " .. parsed.itemName .. " - " .. tostring(craftMsg))
-        end
-    end
-end
-
-local function performScan()
-    STATE.scans = STATE.scans + 1
-    STATE.colonyName = getColonyName()
-    STATE.status = getColonyStatus()
-
-    local stats = { total = 0, sent = 0, crafting = 0, skipped = 0, waiting = 0, missing = 0, bad = 0, pending = 0 }
-    local rows = {}
-    local newPending = {}
-    local newOrder = {}
-    local parsedList = {}
-
-    local requests, err = getRequests()
-    if not requests then
-        stats.bad = 1
-        addRequestRow(rows, "[ERROR] Could not read MineColonies requests.", colors.red)
-        addRequestRow(rows, trimText(tostring(err), 60), colors.red)
-        logError("getRequests failed: " .. tostring(err))
-        addAction("getRequests failed")
-        STATE.stats = stats
-        STATE.requestRows = rows
-        return
-    end
-
-    for _, req in pairs(requests) do
-        stats.total = stats.total + 1
-        local parsed, parseErr = parseRequest(req)
-        if not parsed then
-            stats.bad = stats.bad + 1
-            logError("Bad request: " .. tostring(parseErr))
-        else
-            table.insert(parsedList, parsed)
-            local skip, skipReason = shouldSkipRequest(req, parsed)
-            local key = requestKey(parsed)
-            local allowed, reason = shouldProcessRequest(key, parsed, newPending, newOrder, skip and skipReason or nil)
-            if allowed then
-                processParsedRequest(parsed, rows, stats)
-            elseif reason == "PENDING" then
-                stats.pending = stats.pending + 1
-                stats.waiting = stats.waiting + 1
-                local pendingReason = newPending[key] and newPending[key].reason or "pending"
-                addRequestRow(rows, "[PENDING] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 39) .. " (" .. trimText(pendingReason, 14) .. ")", colors.yellow)
-            elseif reason == "BLACKLISTED" then
-                stats.skipped = stats.skipped + 1
-                addRequestRow(rows, "[BLOCKED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.red)
-            else
-                stats.waiting = stats.waiting + 1
-                addRequestRow(rows, "[DENIED] " .. tostring(parsed.amount) .. "x " .. trimText(parsed.itemName, 45), colors.orange)
-            end
-        end
-    end
-
-    STATE.pending = newPending
-    STATE.pendingOrder = newOrder
-    normalizeSelectedPending()
-    STATE.stats = stats
-    STATE.requestRows = rows
-    STATE.buildRows = buildMaterialRows(parsedList)
-    STATE.workOrderRows = getWorkOrderRows()
-    STATE.manual = STATE.manual + stats.skipped
-    STATE.waiting = STATE.waiting + stats.waiting
-    STATE.bad = STATE.bad + stats.bad
-
-    if stats.total == 0 then addAction("No colony requests") end
-end
-
--------------------------
--- TOUCH
--------------------------
 
 local function handleTouch(screenName, x, y)
-    for _, button in ipairs(BUTTONS) do
-        if button.screen == screenName and x >= button.x1 and x <= button.x2 and y >= button.y1 and y <= button.y2 then
-            local ok, err = pcall(button.action)
-            if not ok then logError("Button error: " .. tostring(err)); addAction("Button error") end
+    for _, b in ipairs(BUTTONS) do
+        if b.screen == screenName and x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2 then
+            local okTouch, err = pcall(b.action)
+            if not okTouch then append(CONFIG.errorFile, "Button error: " .. text(err)) end
             return true
         end
     end
     return false
 end
 
--------------------------
--- START
--------------------------
-
-initMonitors()
+detectMonitors()
 bootSplash()
-
 term.redirect(nativeTerm)
-clearScreen()
+clear()
 print("HTP Colony Supply running.")
-print("Main: " .. tostring(MAIN.name) .. " " .. tostring(MAIN.w) .. "x" .. tostring(MAIN.h))
-print("Control: " .. tostring(CONTROL and CONTROL.name or "none"))
-
-logInfo("HackThePlanet Colony Supply started.")
-logInfo("Output target: " .. tostring(CONFIG.outputTarget))
-logInfo("Main monitor: " .. tostring(MAIN.name) .. " Control monitor: " .. tostring(CONTROL and CONTROL.name or "none"))
-addAction("Program started")
-
-local ok, err = pcall(performScan)
-if not ok then logError("Initial scan error: " .. tostring(err)); addAction("Initial scan error") end
-
-local nextScanAt = nowSeconds() + CONFIG.scanSeconds
-renderAll(CONFIG.scanSeconds)
-
+print("Main: " .. text(MAIN.name) .. " " .. text(MAIN.w) .. "x" .. text(MAIN.h))
+print("Control: " .. text(CONTROL and CONTROL.name or "none"))
+action("Program started")
+local okScan, scanErr = pcall(scan)
+if not okScan then append(CONFIG.errorFile, "Initial scan error: " .. text(scanErr)); action("Initial scan error") end
+local nextScan = now() + CONFIG.scanSeconds
+render(CONFIG.scanSeconds)
 while true do
-    local countdown = math.max(0, nextScanAt - nowSeconds())
-    renderAll(countdown)
-
+    local countdown = math.max(0, nextScan - now())
+    render(countdown)
     local timer = os.startTimer(1)
     local event = { os.pullEvent() }
-
-    if event[1] == "monitor_touch" then
-        handleTouch(event[2], event[3], event[4])
-        renderAll(math.max(0, nextScanAt - nowSeconds()))
-    end
-
-    if STATE.nextScanNow or nowSeconds() >= nextScanAt then
-        STATE.nextScanNow = false
-        local scanOk, scanErr = pcall(performScan)
-        if not scanOk then
-            logError("Main loop scan error: " .. tostring(scanErr))
-            addAction("Scan error")
-        end
-        nextScanAt = nowSeconds() + CONFIG.scanSeconds
+    if event[1] == "monitor_touch" then handleTouch(event[2], event[3], event[4]); render(math.max(0, nextScan - now())) end
+    if STATE.scanNow or now() >= nextScan then
+        STATE.scanNow = false
+        local scanOk, err = pcall(scan)
+        if not scanOk then append(CONFIG.errorFile, "Scan error: " .. text(err)); action("Scan error") end
+        nextScan = now() + CONFIG.scanSeconds
     end
 end
