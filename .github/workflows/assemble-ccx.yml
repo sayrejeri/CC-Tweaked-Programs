@@ -3,7 +3,7 @@ name: Assemble CCxMCxHTP
 on:
   push:
     paths:
-      - 'programs/.ccx_parts/chunk*.txt'
+      - 'programs/.ccx_parts/gzchunk*.txt'
 
 permissions:
   contents: write
@@ -24,15 +24,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count=$(find programs/.ccx_parts -maxdepth 1 -type f -name 'chunk*.txt' | wc -l)
-          if [ "$count" -ne 25 ]; then
-            echo "Waiting for all 25 verified chunks; currently have $count."
+          count=$(find programs/.ccx_parts -maxdepth 1 -type f -name 'gzchunk*.txt' | wc -l)
+          if [ "$count" -ne 21 ]; then
+            echo "Waiting for all 21 compressed chunks; currently have $count."
             exit 0
           fi
-          cat $(find programs/.ccx_parts -maxdepth 1 -type f -name 'chunk*.txt' | sort) | base64 --decode > programs/CCxMCxHTP.lua.new
+          cat $(find programs/.ccx_parts -maxdepth 1 -type f -name 'gzchunk*.txt' | sort) | base64 --decode > programs/CCxMCxHTP.lua.gz
+          gzip -dc programs/CCxMCxHTP.lua.gz > programs/CCxMCxHTP.lua.new
           echo 'f631c406e3e1f924eedb9078a2722d37bd92b59b1e5bc596f7683cd743c17f9b  programs/CCxMCxHTP.lua.new' | sha256sum -c -
           grep -q -- '-- Version: 2.0.0' programs/CCxMCxHTP.lua.new
           mv programs/CCxMCxHTP.lua.new programs/CCxMCxHTP.lua
+          rm -f programs/CCxMCxHTP.lua.gz
           rm -rf programs/.ccx_parts
           rm -f .github/workflows/assemble-ccx.yml
           git config user.name 'github-actions[bot]'
