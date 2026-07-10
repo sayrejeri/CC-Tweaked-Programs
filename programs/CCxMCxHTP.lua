@@ -1190,41 +1190,82 @@ end
 -- HISTORY COLLAPSING
 -------------------------
 
-local function collapsedHistoryRows()
-    local raw = readLines(CONFIG.historyFile, CONFIG.maxHistoryLines * 3)
-    local rows = {}
-    local idleCount = 0
-    local idleFirst = nil
-    local idleLast = nil
+local function historyRowColor(message)
+    local lowered = lower(message)
+    if lowered:find("output test passed", 1, true) then return colors.lime end
+    if lowered:find("sent ", 1, true) or lowered:find("requests resumed", 1, true) then return colors.lime end
+    if lowered:find("crafting ", 1, true) then return colors.yellow end
+    if lowered:find("denied", 1, true) then return colors.orange end
+    if lowered:find("failed", 1, true) or lowered:find("error", 1, true) or lowered:find("blocked", 1, true) then return colors.red end
+    if lowered:find("idle", 1, true) or lowered:find("no colony requests", 1, true) then return colors.gray end
+    return colors.white
+end
 
-    local function flushIdle()
-        if idleCount <= 0 then return end
-        local label = idleCount == 1 and "Colony idle: no open requests" or ("Colony idle entries combined x" .. idleCount)
-        if idleFirst and idleLast and idleFirst ~= idleLast then label = idleFirst .. " - " .. idleLast .. " " .. label end
-        table.insert(rows, { text = label, color = colors.gray })
-        idleCount, idleFirst, idleLast = 0, nil, nil
+local function collapsedHistoryRows()
+    local raw = readLines(CONFIG.historyFile, CONFIG.maxHistoryLines * 4)
+    local rows = {}
+    local currentMessage = nil
+    local firstStamp = nil
+    local lastStamp = nil
+    local repeatCount = 0
+
+    local function normaliseMessage(message)
+        if message == "No colony requests" or message == "Colony idle: no open requests" then
+            return "Colony idle: no open requests"
+        end
+        return message
+    end
+
+    local function flushRepeated()
+        if not currentMessage or repeatCount <= 0 then return end
+
+        local display = currentMessage
+        if repeatCount > 1 then
+            display = display .. " x" .. repeatCount
+            if firstStamp and lastStamp and firstStamp ~= lastStamp then
+                display = firstStamp .. " - " .. lastStamp .. " " .. display
+            elseif firstStamp then
+                display = firstStamp .. " " .. display
+            end
+        elseif firstStamp then
+            display = firstStamp .. " " .. display
+        end
+
+        table.insert(rows, {
+            text = display,
+            color = historyRowColor(currentMessage)
+        })
     end
 
     for _, line in ipairs(raw) do
-        if line:find("No colony requests", 1, true) or line:find("Colony idle: no open requests", 1, true) then
-            idleCount = idleCount + 1
-            local stamp = line:match("^(%b[])")
-            idleFirst = idleFirst or stamp
-            idleLast = stamp or idleLast
+        local stamp, message = line:match("^(%b[])%s*(.*)$")
+        message = normaliseMessage(message or line)
+
+        if message == currentMessage then
+            repeatCount = repeatCount + 1
+            lastStamp = stamp or lastStamp
         else
-            flushIdle()
-            table.insert(rows, { text = line, color = colors.white })
+            flushRepeated()
+            currentMessage = message
+            firstStamp = stamp
+            lastStamp = stamp
+            repeatCount = 1
         end
     end
-    flushIdle()
+    flushRepeated()
 
     if STATE.idleActive then
-        table.insert(rows, { text = "Currently idle: " .. STATE.idleScans .. " scans (" .. fmtDuration(epoch() - (STATE.idleStarted or epoch())) .. ")", color = colors.gray })
+        table.insert(rows, {
+            text = "Currently idle: " .. STATE.idleScans .. " scans (" .. fmtDuration(epoch() - (STATE.idleStarted or epoch())) .. ")",
+            color = colors.gray
+        })
     end
 
     if #rows > CONFIG.maxHistoryLines then
         local reduced = {}
-        for i = #rows - CONFIG.maxHistoryLines + 1, #rows do table.insert(reduced, rows[i]) end
+        for i = #rows - CONFIG.maxHistoryLines + 1, #rows do
+            table.insert(reduced, rows[i])
+        end
         rows = reduced
     end
     return rows
