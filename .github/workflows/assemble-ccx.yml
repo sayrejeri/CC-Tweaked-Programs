@@ -1,0 +1,40 @@
+name: Assemble CCxMCxHTP
+
+on:
+  push:
+    paths:
+      - 'programs/.ccx_parts/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: assemble-ccx
+  cancel-in-progress: true
+
+jobs:
+  assemble:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assemble program
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find programs/.ccx_parts -maxdepth 1 -type f -name 'part*.txt' | wc -l)
+          if [ "$count" -lt 15 ]; then
+            echo "Waiting for all 15 parts; currently have $count."
+            exit 0
+          fi
+          cat $(find programs/.ccx_parts -maxdepth 1 -type f -name 'part*.txt' | sort) | base64 --decode > programs/CCxMCxHTP.lua
+          grep -q -- '-- Version: 2.0.0' programs/CCxMCxHTP.lua
+          rm -rf programs/.ccx_parts
+          rm -f .github/workflows/assemble-ccx.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add full CCxMCxHTP v2 feature update'
+          git push
