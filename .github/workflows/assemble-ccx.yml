@@ -3,7 +3,7 @@ name: Assemble CCxMCxHTP
 on:
   push:
     paths:
-      - 'programs/.ccx_parts/**'
+      - 'programs/.ccx_parts/chunk*.txt'
 
 permissions:
   contents: write
@@ -20,17 +20,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Assemble program
+      - name: Assemble verified program
         shell: bash
         run: |
           set -euo pipefail
-          count=$(find programs/.ccx_parts -maxdepth 1 -type f -name 'part*.txt' | wc -l)
-          if [ "$count" -lt 15 ]; then
-            echo "Waiting for all 15 parts; currently have $count."
+          count=$(find programs/.ccx_parts -maxdepth 1 -type f -name 'chunk*.txt' | wc -l)
+          if [ "$count" -ne 25 ]; then
+            echo "Waiting for all 25 verified chunks; currently have $count."
             exit 0
           fi
-          cat $(find programs/.ccx_parts -maxdepth 1 -type f -name 'part*.txt' | sort) | base64 --decode > programs/CCxMCxHTP.lua
-          grep -q -- '-- Version: 2.0.0' programs/CCxMCxHTP.lua
+          cat $(find programs/.ccx_parts -maxdepth 1 -type f -name 'chunk*.txt' | sort) | base64 --decode > programs/CCxMCxHTP.lua.new
+          echo 'f631c406e3e1f924eedb9078a2722d37bd92b59b1e5bc596f7683cd743c17f9b  programs/CCxMCxHTP.lua.new' | sha256sum -c -
+          grep -q -- '-- Version: 2.0.0' programs/CCxMCxHTP.lua.new
+          mv programs/CCxMCxHTP.lua.new programs/CCxMCxHTP.lua
           rm -rf programs/.ccx_parts
           rm -f .github/workflows/assemble-ccx.yml
           git config user.name 'github-actions[bot]'
