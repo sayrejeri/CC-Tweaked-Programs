@@ -1,8 +1,8 @@
 -- startup
 -- HackThePlanet CC & MineColonies Program installer
--- Installs v2.2.3 by patching the verified v2.2.0 installer.
+-- Installs v2.2.4 by patching the verified v2.2.0 installer.
 
-local VERSION = "2.2.3"
+local VERSION = "2.2.4"
 local SOURCE_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/5ef48867ea72b1f857cd61c47375042b5dc90b59/programs/CCxMCxHTP.lua"
 
 local function fail(message)
@@ -36,28 +36,28 @@ if not installer or installer == "" then fail("Downloaded installer was empty") 
 installer = replaceFirst(
     installer,
     "-- Installs verified version 2.2.0 from the verified v2.1.0 source bundle.",
-    "-- Installs verified version 2.2.3 from the verified v2.1.0 source bundle.",
+    "-- Installs verified version 2.2.4 from the verified v2.1.0 source bundle.",
     "installer comment"
 )
 
 installer = replaceFirst(
     installer,
     'local VERSION = "2.2.0"\nlocal SOURCE_VERSION = "2.1.0"',
-    'local VERSION = "2.2.3"\nlocal SOURCE_VERSION = "2.1.0"',
+    'local VERSION = "2.2.4"\nlocal SOURCE_VERSION = "2.1.0"',
     "installer version"
 )
 
 installer = replaceFirst(
     installer,
     'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.0", "version comment")',
-    'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.3", "version comment")',
+    'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.4", "version comment")',
     "runtime version comment"
 )
 
 installer = replaceFirst(
     installer,
     [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.0"', "runtime version")]],
-    [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.3"', "runtime version")]],
+    [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.4"', "runtime version")]],
     "runtime version"
 )
 
@@ -80,6 +80,65 @@ installer = replaceFirst(
     "warehouse rack name matcher"
 )
 
+local backupListPatchPoint = [[    local files = {
+        "startup",
+        CONFIG.settingsFile,]]
+
+local backupListReplacement = [[    local files = {
+        CONFIG.settingsFile,]]
+
+installer = replaceFirst(
+    installer,
+    backupListPatchPoint,
+    backupListReplacement,
+    "exclude startup from floppy backup"
+)
+
+local backupRootPoint = [[    local root = fs.combine(BACKUP.mount, CONFIG.backupFolder)
+    if not fs.exists(root) then fs.makeDir(root) end
+
+    local files = {]]
+
+local backupRootReplacement = [[    local root = fs.combine(BACKUP.mount, CONFIG.backupFolder)
+    if not fs.exists(root) then fs.makeDir(root) end
+
+    -- Older versions copied the full startup program to the floppy and could fill it.
+    local oldStartupBackup = fs.combine(root, "startup")
+    if fs.exists(oldStartupBackup) then pcall(function() fs.delete(oldStartupBackup) end) end
+
+    local files = {]]
+
+installer = replaceFirst(
+    installer,
+    backupRootPoint,
+    backupRootReplacement,
+    "remove oversized legacy startup backup"
+)
+
+local unsafeWritePoint = [[    output.write(data or "")
+    output.close()
+    return true]]
+
+local safeWriteReplacement = [[    local okWrite = pcall(function()
+        output.write(data or "")
+    end)
+    output.close()
+
+    if not okWrite then
+        pcall(function()
+            if fs.exists(destination) then fs.delete(destination) end
+        end)
+        return false
+    end
+    return true]]
+
+installer = replaceFirst(
+    installer,
+    unsafeWritePoint,
+    safeWriteReplacement,
+    "safe floppy write"
+)
+
 local compilePoint = [[local compiled, compileError = load(decoded, "@startup.new")]]
 
 local cacheSafeUpdaterPatch = [====[
@@ -88,7 +147,6 @@ local function updateProgram()
     local temp = "startup.new"
     if fs.exists(temp) then fs.delete(temp) end
 
-    -- GitHub's raw main-branch URL can be cached. A unique query value forces a fresh installer.
     local freshUrl = RAW_URL .. "?cache=" .. tostring(now())
     local response, requestError = http.get(freshUrl, nil, true)
     if not response then
@@ -149,12 +207,13 @@ installer = replaceFirst(
     "cache-safe updater patch"
 )
 
-local compiled, compileError = load(installer, "@htp_v223_installer")
+local compiled, compileError = load(installer, "@htp_v224_installer")
 if not compiled then fail("Patched installer syntax error: " .. tostring(compileError)) end
 
 term.setTextColor(colors.lime)
-print("Old updater collision bypassed.")
 print("Rack detection patch loaded.")
+print("Oversized floppy startup backup removed.")
+print("Disk-full backup crashes are now handled safely.")
 print("Future updates will bypass raw GitHub cache.")
 term.setTextColor(colors.white)
 compiled()
