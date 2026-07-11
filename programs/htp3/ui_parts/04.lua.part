@@ -1,0 +1,132 @@
+                addButton(I.controlMonitor.name, 2, y, half, 2, "TEST RACK", function() local r = S.selectedRackInfo(); if r then local ok, msg = I.testRack(r.name); S.action(msg, ok and colors.lime or colors.red, true) end end, colors.lightBlue)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "GROUP", cycleRackGroup, colors.yellow)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "ENABLE/DISABLE", toggleRack, colors.orange)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "RESCAN", function() I.detect(); S.forceScan = true end, colors.lime)
+            elseif S.page == "STOCK" then
+                local half = math.max(8, math.floor((width - 5) / 2))
+                addButton(I.controlMonitor.name, 2, y, half, 2, "PREV ITEM", function() S.selectedStock = S.selectedStock - 1; S.selectedStockInfo(); S.saveRuntime() end, colors.gray)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "NEXT ITEM", function() S.selectedStock = S.selectedStock + 1; S.selectedStockInfo(); S.saveRuntime() end, colors.gray)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "+64 TARGET", function() adjustSelectedStock(64) end, colors.lime)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "-64 TARGET", function() adjustSelectedStock(-64) end, colors.orange)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, width - 3, 2, C.processing.stockEnabled and "DISABLE STOCK" or "ENABLE STOCK", function() C.toggle("stockEnabled"); S.forceScan = true end, C.processing.stockEnabled and colors.red or colors.green)
+            elseif S.page == "BACKUP" then
+                local half = math.max(8, math.floor((width - 5) / 2))
+                addButton(I.controlMonitor.name, 2, y, half, 2, "BACKUP NOW", function() local ok, msg = B.backup(true, "manual"); S.action(msg, ok and colors.lime or colors.red, true) end, colors.green)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "RESTORE SETTINGS", function() restore("SETTINGS") end, colors.orange)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "RESTORE STATE", function() restore("STATE") end, colors.orange)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "RESTORE LOGS", function() restore("LOGS") end, colors.orange)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, width - 3, 2, "RESTORE ALL", function() restore("ALL") end, colors.red)
+            elseif S.page == "RULES" then
+                local categories = { "BUILD", "TOOL", "ARMOR", "FOOD", "FUEL", "SPECIAL", "OTHER", "STOCK" }
+                local half = math.max(8, math.floor((width - 5) / 2))
+                for index, category in ipairs(categories) do
+                    local column = ((index - 1) % 2)
+                    local row = math.floor((index - 1) / 2)
+                    addButton(I.controlMonitor.name, 2 + column * (half + 1), y + row * 3, half, 2, category .. ":" .. C.modes[category], function() C.cycleMode(category); S.forceScan = true end, C.modes[category] == "AUTO" and colors.lime or (C.modes[category] == "OFF" and colors.red or colors.yellow))
+                end
+                local buildingY = y + 13
+                local choice = S.selectedBuildingInfo()
+                if choice and height >= buildingY + 10 then
+                    writeAt(2, buildingY, "Building: " .. U.trim(choice.name, width - 12), colors.yellow)
+                    addButton(I.controlMonitor.name, 2, buildingY + 2, half, 2, "PREV BUILD", function() S.selectedBuilding = S.selectedBuilding - 1; S.selectedBuildingInfo(); S.saveRuntime() end, colors.gray)
+                    addButton(I.controlMonitor.name, 3 + half, buildingY + 2, half, 2, "NEXT BUILD", function() S.selectedBuilding = S.selectedBuilding + 1; S.selectedBuildingInfo(); S.saveRuntime() end, colors.gray)
+                    addButton(I.controlMonitor.name, 2, buildingY + 5, half, 2, "CYCLE MODE", function()
+                        local selected = S.selectedBuildingInfo(); if not selected then return end
+                        local rule = S.buildingRules[selected.key] or { mode = "INHERIT", priorityBoost = 0 }
+                        local modes = { "INHERIT", "AUTO", "APPROVAL", "OFF" }
+                        local modeIndex = 1
+                        for i, mode in ipairs(modes) do if mode == (rule.mode or "INHERIT") then modeIndex = i break end end
+                        rule.mode = modes[(modeIndex % #modes) + 1]
+                        S.setBuildingRule(selected.key, rule)
+                        S.action(selected.name .. " mode -> " .. rule.mode, colors.yellow, true)
+                    end, colors.yellow)
+                    addButton(I.controlMonitor.name, 3 + half, buildingY + 5, half, 2, "PRIORITY +10", function()
+                        local selected = S.selectedBuildingInfo(); if not selected then return end
+                        local rule = S.buildingRules[selected.key] or { mode = "INHERIT", priorityBoost = 0 }
+                        rule.priorityBoost = math.min(100, (tonumber(rule.priorityBoost) or 0) + 10)
+                        S.setBuildingRule(selected.key, rule)
+                    end, colors.lime)
+                    addButton(I.controlMonitor.name, 2, buildingY + 8, half, 2, "PRIORITY -10", function()
+                        local selected = S.selectedBuildingInfo(); if not selected then return end
+                        local rule = S.buildingRules[selected.key] or { mode = "INHERIT", priorityBoost = 0 }
+                        rule.priorityBoost = math.max(-100, (tonumber(rule.priorityBoost) or 0) - 10)
+                        S.setBuildingRule(selected.key, rule)
+                    end, colors.orange)
+                    addButton(I.controlMonitor.name, 3 + half, buildingY + 8, half, 2, "CLEAR RULE", function() local selected = S.selectedBuildingInfo(); if selected then S.setBuildingRule(selected.key, nil) end end, colors.red)
+                end
+            else
+                local half = math.max(8, math.floor((width - 5) / 2))
+                addButton(I.controlMonitor.name, 2, y, half, 2, C.processing.paused and "RESUME" or "PAUSE", function() C.toggle("paused"); S.forceScan = true end, C.processing.paused and colors.lime or colors.orange)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, C.processing.dryRun and "DRY RUN OFF" or "DRY RUN ON", function() C.toggle("dryRun"); S.forceScan = true end, C.processing.dryRun and colors.red or colors.lightBlue)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "SCAN NOW", function() S.forceScan = true end, colors.lime)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "PAGE -", function() S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) - 1 end, colors.gray)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "PAGE +", function() S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) + 1 end, colors.gray)
+                if E.updateProgram then addButton(I.controlMonitor.name, 3 + half, y, half, 2, "UPDATE", E.updateProgram, colors.purple) end
+            end
+
+            if height >= y + 8 and not S.remoteMode then
+                writeAt(2, height - 2, "Last: " .. U.trim(S.lastAction, width - 8), colors.gray)
+                writeAt(2, height - 1, "BK " .. (B.lastVerified and "OK" or "NO") .. " | CPU " .. U.text(S.health.craftingAvailable) .. "/" .. U.text(S.health.craftingCPUs) .. " | Req " .. #S.requests, colors.gray)
+            end
+        end)
+    end
+
+    function UI.drawAlert()
+        if not I.alertMonitor then return end
+        withScreen(I.alertMonitor.object, function()
+            local alert = S.alerts[1] or { text = "HTP READY", color = colors.black, background = colors.lime }
+            local background = alert.background or colors.black
+            if background == colors.red and U.now() % 2 == 1 then background = colors.black end
+            clear(background)
+            local width, height = dimensions()
+            for y = 1, height do fillAt(1, y, width, " ", alert.color or colors.white, background) end
+            center(math.max(1, math.floor((height + 1) / 2)), U.trim(alert.text, width), alert.color or colors.white, background)
+        end)
+    end
+
+    function UI.render(countdown)
+        UI.drawMain(countdown)
+        UI.drawControl(countdown)
+        UI.drawAlert()
+        UI.lastDraw = U.now()
+    end
+
+    function UI.handleTouch(screenName, x, y)
+        for _, button in ipairs(UI.buttons) do
+            if button.screen == screenName and x >= button.x1 and x <= button.x2 and y >= button.y1 and y <= button.y2 then
+                local ok, err = pcall(button.callback)
+                if not ok then S.error("Button failed: " .. U.text(err)) end
+                return true
+            end
+        end
+        return false
+    end
+
+    function UI.handleKey(key)
+        if key == keys.left then S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) - 1
+        elseif key == keys.right then S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) + 1
+        elseif key == keys.up then S.selectedRequest = S.selectedRequest - 1; S.selectedPending()
+        elseif key == keys.down then S.selectedRequest = S.selectedRequest + 1; S.selectedPending()
+        elseif key == keys.space then C.toggle("paused"); S.forceScan = true
+        elseif key == keys.r then S.forceScan = true
+        elseif key == keys.d then C.toggle("dryRun")
+        elseif key == keys.tab then
+            local index = 1
+            for i, page in ipairs(PAGES) do if page == S.page then index = i break end end
+            S.page = PAGES[(index % #PAGES) + 1]
+        end
+        S.saveRuntime()
+    end
+
+    UI.PAGES = PAGES
+    return UI
+end
+
+return createUI
