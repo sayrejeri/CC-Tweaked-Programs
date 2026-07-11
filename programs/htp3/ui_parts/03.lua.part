@@ -1,0 +1,150 @@
+            { text = "General requests: " .. tostring(C.processing.useGeneralRequests), color = colors.white },
+            { text = "Direct fallback: " .. U.text(C.processing.directFallbackSide), color = colors.white },
+            { text = "Auto reclaim stale: " .. tostring(C.processing.autoReclaimStale), color = C.processing.autoReclaimStale and colors.orange or colors.white },
+            { text = "Adaptive scans: busy " .. C.scan.busy .. "s / pending " .. C.scan.pending .. "s / normal " .. C.scan.normal .. "s / idle " .. C.scan.idle .. "s / deep " .. C.scan.deepIdle .. "s", color = colors.cyan },
+            { text = "External speaker/redstone/chat/Discord alerts remain held and disabled.", color = colors.gray }
+        }
+    end
+
+    local function remoteDashboard(countdown)
+        local snapshot = S.remoteSnapshot
+        clear(); header(countdown)
+        local width, height = dimensions()
+        if not snapshot or U.now() - S.remoteLastSeen > 20 then
+            center(math.floor(height / 2), "Waiting for HTP Colony Supply broadcast...", colors.orange)
+            center(math.floor(height / 2) + 2, "Wireless modem channel " .. C.remote.channel, colors.gray)
+            return
+        end
+        box(1, 5, width, 8, "Remote Colony", colors.gray)
+        writeAt(3, 6, "Colony: " .. U.text(snapshot.colony and snapshot.colony.name), colors.yellow)
+        writeAt(3, 7, "Status: " .. ((snapshot.colony and (snapshot.colony.underAttack or snapshot.colony.underRaid)) and "UNDER ATTACK" or "Safe"), (snapshot.colony and (snapshot.colony.underAttack or snapshot.colony.underRaid)) and colors.red or colors.lime)
+        writeAt(3, 8, "Requests: " .. U.text(snapshot.stats and snapshot.stats.total) .. " | Pending: " .. U.text(snapshot.stats and snapshot.stats.pending) .. " | Racks: " .. U.text(snapshot.health and snapshot.health.racks), colors.white)
+        writeAt(3, 9, "Warehouse: " .. math.floor(((snapshot.health and snapshot.health.rackPercent) or 0) * 100) .. "% | CPU free: " .. U.text(snapshot.health and snapshot.health.craftingAvailable), colors.white)
+        writeAt(3, 10, "Paused: " .. tostring(snapshot.paused) .. " | Dry Run: " .. tostring(snapshot.dryRun) .. " | Last: " .. U.trim(snapshot.lastAction, width - 36), colors.cyan)
+        local rows = {}
+        for _, request in ipairs(snapshot.requests or {}) do rows[#rows + 1] = { text = "[" .. request.status .. "] [" .. request.category .. "] " .. request.amount .. "x " .. request.name .. " -> " .. request.destination, color = statusColor(request.status) } end
+        box(1, 14, width, height - 13, "Remote Requests", colors.gray)
+        drawRows(3, 16, width - 4, height - 16, rows, "No remote requests")
+    end
+
+    function UI.drawMain(countdown)
+        local screen = I.mainMonitor and I.mainMonitor.object or term.native()
+        withScreen(screen, function()
+            if S.remoteMode then remoteDashboard(countdown) return end
+            if S.page == "DASHBOARD" then dashboard(countdown)
+            elseif S.page == "REQUESTS" then simplePage(countdown, "REQUESTS", "All Requests", requestRows(S.requests), "No open requests")
+            elseif S.page == "PENDING" then simplePage(countdown, "PENDING", "Pending Approval", pendingRows(), "No pending approvals")
+            elseif S.page == "BUILD" then simplePage(countdown, "BUILD", "Work Orders and Direct Builder Resources", workRows(), "No active work orders")
+            elseif S.page == "CITIZENS" then simplePage(countdown, "CITIZENS", "Citizens", citizenRows(), "No citizen data")
+            elseif S.page == "WAREHOUSE" then simplePage(countdown, "WAREHOUSE", "Warehouse Capacity", warehouseRows(), "No racks detected")
+            elseif S.page == "CRAFTS" then simplePage(countdown, "CRAFTS", "AE2 Crafting Queue", craftRows(), "No tracked craft jobs")
+            elseif S.page == "STOCK" then simplePage(countdown, "STOCK", "Proactive Warehouse Stock", stockRows(), "No stock targets")
+            elseif S.page == "RULES" then simplePage(countdown, "RULES", "Request and Building Rules", ruleRows(), "No rules")
+            elseif S.page == "BACKUP" then simplePage(countdown, "BACKUP", "Floppy Backups and Restore", backupRows(), "No backup disk")
+            elseif S.page == "DIAG" then simplePage(countdown, "DIAG", "Diagnostics", diagnosticRows(), "No diagnostics")
+            elseif S.page == "HISTORY" then simplePage(countdown, "HISTORY", "History", U.readLines(C.files.history, 300), "No history")
+            elseif S.page == "ERRORS" then simplePage(countdown, "ERRORS", "Errors", U.readLines(C.files.errors, 300), "No errors")
+            elseif S.page == "SENT" then simplePage(countdown, "SENT", "Sent Deliveries", U.readLines(C.files.sent, 300), "Nothing sent")
+            elseif S.page == "SETTINGS" then simplePage(countdown, "SETTINGS", "Settings", settingsRows(), "No settings")
+            else dashboard(countdown) end
+        end)
+    end
+
+    local function addButton(screenName, x, y, width, height, label, callback, background, foreground)
+        UI.buttons[#UI.buttons + 1] = { screen = screenName, x1 = x, y1 = y, x2 = x + width - 1, y2 = y + height - 1, callback = callback }
+        for row = 0, height - 1 do fillAt(x, y + row, width, " ", foreground or colors.black, background or colors.gray) end
+        writeAt(x + math.max(0, math.floor((width - #label) / 2)), y + math.floor(height / 2), label, foreground or colors.black, background or colors.gray)
+    end
+
+    local function setPage(page)
+        S.page = page
+        S.saveRuntime()
+    end
+
+    local function cycleRackGroup()
+        local info = S.selectedRackInfo()
+        if not info then return end
+        local groups = { "ANY", "BUILD", "FOOD", "TOOL", "ARMOR", "FUEL", "SPECIAL", "STOCK", "BUILDING" }
+        local current = string.upper(U.text((S.rackRules[info.name] or {}).group or "ANY"))
+        local index = 1
+        for i, group in ipairs(groups) do if group == current then index = i break end end
+        index = (index % #groups) + 1
+        local rule = S.rackRules[info.name] or { enabled = true }
+        rule.group = groups[index]
+        S.setRackRule(info.name, rule)
+        S.action(info.name .. " group -> " .. rule.group, colors.yellow, true)
+    end
+
+    local function toggleRack()
+        local info = S.selectedRackInfo()
+        if not info then return end
+        local rule = S.rackRules[info.name] or { group = "ANY", enabled = true }
+        rule.enabled = rule.enabled == false
+        S.setRackRule(info.name, rule)
+        S.action(info.name .. (rule.enabled and " enabled" or " disabled"), rule.enabled and colors.lime or colors.red, true)
+    end
+
+    local function adjustSelectedStock(delta)
+        local target, key = S.selectedStockInfo()
+        if not target then return end
+        S.setStockTarget(key, math.max(0, (tonumber(target.target) or 0) + delta))
+    end
+
+    local function restore(mode)
+        local ok, message = B.requestRestore(mode)
+        S.action(message, ok and colors.lime or colors.orange, true)
+        if ok then sleep(1); os.reboot() end
+    end
+
+    function UI.drawControl(countdown)
+        if not I.controlMonitor then return end
+        UI.buttons = {}
+        withScreen(I.controlMonitor.object, function()
+            clear()
+            local width, height = dimensions()
+            center(1, "HTP CONTROL v" .. C.version, colors.lime)
+            center(2, (S.remoteMode and "REMOTE" or C.processing.globalMode) .. " | Next " .. math.max(0, math.floor(countdown or 0)) .. "s | WH " .. math.floor((S.health.rackPercent or 0) * 100) .. "%", colors.cyan)
+            fillAt(1, 3, width, "=", colors.gray)
+            local columns = 4
+            local gap = 1
+            local buttonWidth = math.max(7, math.floor((width - (columns + 1) - ((columns - 1) * gap)) / columns))
+            local function nav(column, row, page, label)
+                local x = 2 + (column - 1) * (buttonWidth + gap)
+                addButton(I.controlMonitor.name, x, row, buttonWidth, 2, label or page, function() setPage(page) end, S.page == page and colors.lime or colors.gray)
+            end
+            nav(1, 4, "DASHBOARD", "DASH")
+            nav(2, 4, "REQUESTS", "REQUESTS")
+            nav(3, 4, "PENDING", "PENDING")
+            nav(4, 4, "BUILD", "BUILD")
+            nav(1, 7, "CITIZENS", "CITIZENS")
+            nav(2, 7, "WAREHOUSE", "WAREHOUSE")
+            nav(3, 7, "CRAFTS", "CRAFTS")
+            nav(4, 7, "STOCK", "STOCK")
+            nav(1, 10, "RULES", "RULES")
+            nav(2, 10, "BACKUP", "BACKUP")
+            nav(3, 10, "DIAG", "DIAG")
+            nav(4, 10, "SETTINGS", "SETTINGS")
+
+            local y = 14
+            if S.remoteMode then
+                addButton(I.controlMonitor.name, 2, y, buttonWidth, 2, "SCAN", function() I.sendRemoteCommand("scan") end, colors.lightBlue)
+                addButton(I.controlMonitor.name, 3 + buttonWidth, y, buttonWidth, 2, "PAUSE", function() I.sendRemoteCommand("pause") end, colors.orange)
+                addButton(I.controlMonitor.name, 4 + buttonWidth * 2, y, buttonWidth, 2, "RESUME", function() I.sendRemoteCommand("resume") end, colors.lime)
+            elseif S.page == "PENDING" then
+                local half = math.max(8, math.floor((width - 5) / 2))
+                addButton(I.controlMonitor.name, 2, y, half, 2, "PREV", function() S.selectedRequest = S.selectedRequest - 1; S.selectedPending(); S.saveRuntime() end, colors.gray)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "NEXT", function() S.selectedRequest = S.selectedRequest + 1; S.selectedPending(); S.saveRuntime() end, colors.gray)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "APPROVE", function() local r = S.selectedPending(); if r then S.approveOnce(r.key) end end, colors.lime)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "ALWAYS", function() local r = S.selectedPending(); if r then S.approveAlways(r.itemKey) end end, colors.green)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "DENY", function() local r = S.selectedPending(); if r then S.deny(r.key, 300) end end, colors.orange)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "BLOCK", function() local r = S.selectedPending(); if r then S.block(r.itemKey) end end, colors.red)
+                y = y + 3
+                addButton(I.controlMonitor.name, 2, y, half, 2, "URGENT", function() local r = S.selectedPending(); if r then S.toggleUrgent(r.key) end end, colors.purple)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "DUMP EXACT", function() E.dumpRequest(S.selectedPending()) end, colors.lightBlue)
+            elseif S.page == "WAREHOUSE" then
+                local half = math.max(8, math.floor((width - 5) / 2))
+                addButton(I.controlMonitor.name, 2, y, half, 2, "PREV RACK", function() S.selectedRack = S.selectedRack - 1; S.selectedRackInfo(); S.saveRuntime() end, colors.gray)
+                addButton(I.controlMonitor.name, 3 + half, y, half, 2, "NEXT RACK", function() S.selectedRack = S.selectedRack + 1; S.selectedRackInfo(); S.saveRuntime() end, colors.gray)
+                y = y + 3
