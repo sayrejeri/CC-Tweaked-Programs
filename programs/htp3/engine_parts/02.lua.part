@@ -1,0 +1,220 @@
+            result[#result + 1] = request
+            workByItem[request.itemKey] = (workByItem[request.itemKey] or 0) + request.observedRemaining
+        end
+        for _, request in ipairs(generalRequests) do
+            local looksLikeBuilder = request.category == "BUILD" or U.contains(request.destination, "builder")
+            if looksLikeBuilder and (workByItem[request.itemKey] or 0) >= request.observedRemaining then
+                request.dedupedByWorkOrder = true
+            else
+                result[#result + 1] = request
+            end
+        end
+        return result
+    end
+
+    local function applyLifecycle(request, seen)
+        local record = S.ledger[request.key]
+        record = updateObserved(record, request.observedRemaining)
+        local inFlight = tonumber(record.inFlight or 0) or 0
+        request.remaining = math.max(0, request.observedRemaining - inFlight)
+        request.inFlight = inFlight
+        request.priority = priorityFor(request)
+        request.allowed, request.policy = policyFor(request)
+        request.status = record.status or "NEW"
+        request.createdAt = record.createdAt or U.now()
+        seen[request.key] = true
+
+        local fields = {
+            source = request.source,
+            sourceId = request.sourceId,
+            item = request.item,
+            itemKey = request.itemKey,
+            displayName = request.displayName,
+            destination = request.destination,
+            buildingKey = request.buildingKey,
+            category = request.category,
+            observedRemaining = request.observedRemaining,
+            lastObservedRemaining = request.observedRemaining,
+            priority = request.priority,
+            absentScans = 0,
+            workOrderId = request.workOrderId,
+            targetLevel = request.targetLevel,
+            alternatives = request.alternatives,
+            requestState = request.requestState
+        }
+
+        if request.observedRemaining <= 0 then
+            record = S.transition(request.key, "COMPLETED", fields)
+            record.inFlight = 0
+            request.status = "COMPLETED"
+            request.remaining = 0
+        elseif request.remaining <= 0 and inFlight > 0 then
+            record = S.transition(request.key, record.acceptedAt and "ACCEPTED" or "SENT", fields)
+            request.status = record.status
+        elseif not request.allowed then
+            local status = request.policy == "OFF" and "IGNORED" or request.policy
+            if status == "APPROVAL" or status == "PAUSED" then status = "PENDING" end
+            record = S.transition(request.key, status, fields)
+            request.status = status
+        else
+            if record.status == "COMPLETED" or record.status == "IGNORED" or record.status == "FAILED" or record.status == "PENDING" or record.status == "NEW" then
+                record = S.transition(request.key, "QUEUED", fields)
+            else
+                record = S.transition(request.key, record.status or "QUEUED", fields)
+            end
+            request.status = record.status
+        end
+        S.ledger[request.key] = record
+        return request
+    end
+
+    local function markAbsent(seen)
+        for key, record in pairs(S.ledger) do
+            if record.source ~= "STOCK" and not seen[key] and record.status ~= "COMPLETED" and record.status ~= "IGNORED" then
+                record.absentScans = (record.absentScans or 0) + 1
+                if record.absentScans >= C.processing.absentScansToComplete then
+                    record.status = "COMPLETED"
+                    record.completedAt = U.now()
+                    record.inFlight = 0
+                end
+                record.updatedAt = U.now()
+            end
+        end
+    end
+
+    local function buildStockRequests(hasRealWork)
+        local result = {}
+        if not C.processing.stockEnabled then return result end
+        if C.processing.stockOnlyWhenIdle and hasRealWork then return result end
+        for key, target in pairs(S.stockTargets) do
+            local item = type(target.item) == "table" and target.item or { name = key }
+            local desired = tonumber(target.target or 0) or 0
+            if desired > 0 then
+                local current = I.rackItemCount(item)
+                local missing = math.max(0, math.floor(desired - current))
+                if missing > 0 then
+                    local request = {
+                        source = "STOCK",
+                        sourceId = key,
+                        item = U.deepcopy(item),
+                        alternatives = { U.deepcopy(item) },
+                        displayName = target.displayName or U.itemDisplay(item),
+                        description = "Proactive warehouse stock",
+                        destination = "Warehouse Stock",
+                        buildingKey = "warehouse_stock",
+                        observedRemaining = math.min(missing, C.processing.stockBatchLimit),
+                        rawAmount = missing,
+                        category = "STOCK",
+                        itemKey = U.itemKey(item)
+                    }
+                    request.key = requestKey("STOCK", key, item)
+                    request.priority = C.categoryPriority.STOCK
+                    request.allowed = true
+                    request.policy = "STOCK"
+                    request.remaining = request.observedRemaining
+                    request.status = "QUEUED"
+                    result[#result + 1] = request
+                    S.transition(request.key, "QUEUED", {
+                        source = "STOCK", sourceId = key, item = item, itemKey = request.itemKey,
+                        displayName = request.displayName, destination = request.destination,
+                        category = "STOCK", observedRemaining = request.observedRemaining,
+                        stockTarget = desired, stockCurrent = current
+                    })
+                elseif S.ledger[requestKey("STOCK", key, item)] then
+                    S.transition(requestKey("STOCK", key, item), "COMPLETED", { stockTarget = desired, stockCurrent = current, inFlight = 0 })
+                end
+            end
+        end
+        return result
+    end
+
+    local function buildBatches(requests)
+        local byKey = {}
+        for _, request in ipairs(requests) do
+            if request.allowed and request.remaining > 0 and request.status ~= "COMPLETED" and request.status ~= "IGNORED" then
+                local key = request.itemKey .. "|" .. request.category
+                local batch = byKey[key]
+                if not batch then
+                    batch = {
+                        key = key,
+                        itemKey = request.itemKey,
+                        item = U.deepcopy(request.item),
+                        displayName = request.displayName,
+                        category = request.category,
+                        amount = 0,
+                        priority = request.priority,
+                        members = {},
+                        buildingKey = request.buildingKey
+                    }
+                    byKey[key] = batch
+                end
+                batch.amount = batch.amount + request.remaining
+                batch.priority = math.max(batch.priority, request.priority)
+                batch.members[#batch.members + 1] = request
+            end
+        end
+        local result = U.values(byKey)
+        table.sort(result, function(a, b)
+            if a.priority == b.priority then return a.displayName < b.displayName end
+            return a.priority > b.priority
+        end)
+        return result
+    end
+
+    local function reserveFor(item)
+        return tonumber(S.reserves[U.itemKey(item)] or S.reserves[U.itemName(item)] or 0) or 0
+    end
+
+    local function retryDelay(attempt)
+        local schedule = C.processing.retrySchedule or { 30, 120, 600, 1800 }
+        return schedule[math.min(math.max(1, attempt), #schedule)] or 1800
+    end
+
+    local function jobKey(item)
+        return U.itemKey(item)
+    end
+
+    local function updateCraftJobs()
+        for key, job in pairs(S.craftJobs) do
+            job.updatedAt = U.now()
+            local stored = I.aeCount(job.item)
+            job.currentStored = stored
+            local task = job.jobId and I.readCraftTask(job.jobId) or nil
+            if task then
+                job.task = task
+                if task.progress and task.progress ~= job.lastProgress then
+                    job.lastProgress = task.progress
+                    job.lastProgressAt = U.now()
+                end
+                if task.done then
+                    job.status = "DONE"
+                    job.doneAt = U.now()
+                elseif task.canceled then
+                    job.status = "CANCELLED"
+                    job.nextRetry = U.now() + retryDelay(job.attempts or 1)
+                elseif task.error or task.calculationFailed then
+                    job.status = "FAILED"
+                    job.lastError = task.message or "crafting calculation failed"
+                    job.nextRetry = U.now() + retryDelay(job.attempts or 1)
+                elseif task.craftingStarted then
+                    job.status = "CRAFTING"
+                elseif task.calculationStarted then
+                    job.status = "CALCULATING"
+                end
+            elseif I.isCrafting(job.item) then
+                job.status = "CRAFTING"
+            elseif stored >= (job.readyAtCount or math.huge) then
+                job.status = "DONE"
+                job.doneAt = U.now()
+            elseif job.status == "CRAFTING" or job.status == "CALCULATING" then
+                if U.now() - (job.startedAt or U.now()) > C.processing.craftStuckSeconds then
+                    job.status = "STUCK"
+                    job.lastError = "crafting job exceeded " .. C.processing.craftStuckSeconds .. " seconds"
+                    job.nextRetry = U.now() + retryDelay(job.attempts or 1)
+                    I.cancelCraft(job.item)
+                end
+            end
+            if job.status == "CRAFTING" and job.lastProgressAt and U.now() - job.lastProgressAt > C.processing.craftProgressTimeout then
+                job.status = "STUCK"
+                job.lastError = "no crafting progress"
+                job.nextRetry = U.now() + retryDelay(job.attempts or 1)
