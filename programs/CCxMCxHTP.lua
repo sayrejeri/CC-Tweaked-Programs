@@ -1,8 +1,8 @@
 -- startup
 -- HackThePlanet CC & MineColonies Program installer
--- Installs v2.2.1 by patching the verified v2.2.0 installer.
+-- Installs v2.2.2 by patching the verified v2.2.0 installer.
 
-local VERSION = "2.2.1"
+local VERSION = "2.2.2"
 local SOURCE_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/5ef48867ea72b1f857cd61c47375042b5dc90b59/programs/CCxMCxHTP.lua"
 
 local function fail(message)
@@ -14,12 +14,9 @@ local function fail(message)
     error(message, 0)
 end
 
-local function replaceOnce(source, oldText, newText, label)
+local function replaceFirst(source, oldText, newText, label)
     local first, last = source:find(oldText, 1, true)
     if not first then fail("Patch point missing: " .. label) end
-    if source:find(oldText, last + 1, true) then
-        fail("Patch point appeared more than once: " .. label)
-    end
     return source:sub(1, first - 1) .. newText .. source:sub(last + 1)
 end
 
@@ -36,31 +33,31 @@ local installer = response.readAll()
 response.close()
 if not installer or installer == "" then fail("Downloaded installer was empty") end
 
-installer = replaceOnce(
+installer = replaceFirst(
     installer,
     "-- Installs verified version 2.2.0 from the verified v2.1.0 source bundle.",
-    "-- Installs verified version 2.2.1 from the verified v2.1.0 source bundle.",
+    "-- Installs verified version 2.2.2 from the verified v2.1.0 source bundle.",
     "installer comment"
 )
 
-installer = replaceOnce(
+installer = replaceFirst(
     installer,
-    'local VERSION = "2.2.0"',
-    'local VERSION = "2.2.1"',
+    'local VERSION = "2.2.0"\nlocal SOURCE_VERSION = "2.1.0"',
+    'local VERSION = "2.2.2"\nlocal SOURCE_VERSION = "2.1.0"',
     "installer version"
 )
 
-installer = replaceOnce(
+installer = replaceFirst(
     installer,
     'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.0", "version comment")',
-    'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.1", "version comment")',
+    'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.2", "version comment")',
     "runtime version comment"
 )
 
-installer = replaceOnce(
+installer = replaceFirst(
     installer,
     [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.0"', "runtime version")]],
-    [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.1"', "runtime version")]],
+    [[decoded = replaceLiteral(decoded, 'local VERSION = "2.1.0"', 'local VERSION = "2.2.2"', "runtime version")]],
     "runtime version"
 )
 
@@ -76,17 +73,18 @@ local rackPatch = [[decoded = replaceLiteral(decoded,
 
 ]]
 
-installer = replaceOnce(
+installer = replaceFirst(
     installer,
     insertionPoint,
     rackPatch .. insertionPoint,
     "warehouse rack name matcher"
 )
 
-local compiled, compileError = load(installer, "@htp_v221_installer")
+local compiled, compileError = load(installer, "@htp_v222_installer")
 if not compiled then fail("Patched installer syntax error: " .. tostring(compileError)) end
 
 term.setTextColor(colors.lime)
+print("Updater collision fixed.")
 print("Rack detection patch loaded.")
 term.setTextColor(colors.white)
 compiled()
