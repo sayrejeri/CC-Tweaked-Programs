@@ -1,0 +1,126 @@
+name: Patch HTP v2.2.1
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-htp-v221.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch installer
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('programs/CCxMCxHTP.lua')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str, label: str):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              '-- Installs verified version 2.2.0 from the verified v2.1.0 source bundle.',
+              '-- Installs verified version 2.2.1 from the verified v2.1.0 source bundle.',
+              'installer comment',
+          )
+          replace_once('local VERSION = "2.2.0"', 'local VERSION = "2.2.1"', 'installer version')
+          replace_once(
+              'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.0", "version comment")',
+              'decoded = replaceLiteral(decoded, "-- Version: 2.1.0", "-- Version: 2.2.1", "version comment")',
+              'runtime comment patch',
+          )
+          replace_once(
+              "decoded = replaceLiteral(decoded, 'local VERSION = \"2.1.0\"', 'local VERSION = \"2.2.0\"', \"runtime version\")",
+              "decoded = replaceLiteral(decoded, 'local VERSION = \"2.1.0\"', 'local VERSION = \"2.2.1\"', \"runtime version\")",
+              'runtime version patch',
+          )
+
+          marker = '''decoded = replaceLiteral(decoded,
+    '    craftJobsFile = "htp_craft_jobs.cfg",\\n','''
+          addition = '''decoded = replaceLiteral(decoded,
+    '        "^entangledtile_",\\n',
+    '        "^entangledtile_",\\n' ..
+    '        "^entangled:tile_",\\n',
+    "colon Entangled Block peripheral names"
+)
+
+decoded = replaceLiteral(decoded,
+    '    craftJobsFile = "htp_craft_jobs.cfg",\\n','''
+          replace_once(marker, addition, 'colon rack matcher insertion')
+
+          old_copy = '''local function copyBackupFile(source, destination)
+    if not fs.exists(source) or fs.isDir(source) then return false end
+    local input = fs.open(source, "rb") or fs.open(source, "r")
+    if not input then return false end
+    local data = input.readAll()
+    input.close()
+
+    local parent = fs.getDir(destination)
+    if parent ~= "" and not fs.exists(parent) then fs.makeDir(parent) end
+    local output = fs.open(destination, "wb") or fs.open(destination, "w")
+    if not output then return false end
+    output.write(data or "")
+    output.close()
+    return true
+end'''
+
+          new_copy = '''local function copyBackupFile(source, destination)
+    local sourcePath = source
+    if shell and shell.resolve then
+        local okResolve, resolved = pcall(shell.resolve, source)
+        if okResolve and resolved and resolved ~= "" then sourcePath = resolved end
+    end
+    if not fs.exists(sourcePath) or fs.isDir(sourcePath) then return false end
+
+    local parent = fs.getDir(destination)
+    if parent ~= "" and not fs.exists(parent) then fs.makeDir(parent) end
+    if fs.exists(destination) then fs.delete(destination) end
+
+    local okCopy = pcall(function() fs.copy(sourcePath, destination) end)
+    if okCopy and fs.exists(destination) then return true end
+
+    local input = fs.open(sourcePath, "r")
+    if not input then return false end
+    local data = input.readAll()
+    input.close()
+    local output = fs.open(destination, "w")
+    if not output then return false end
+    output.write(data or "")
+    output.close()
+    return fs.exists(destination)
+end'''
+          replace_once(old_copy, new_copy, 'backup copy function')
+
+          replace_once(
+              'local backup = "startup.v21-backup"',
+              'local backup = "startup.v22-backup"',
+              'installer backup filename',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          print('Patched', path)
+          PY
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          rm -f .github/workflows/patch-htp-v221.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Fix colon rack names and networked floppy backups'
+          git push
