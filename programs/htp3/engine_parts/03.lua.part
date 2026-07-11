@@ -1,0 +1,220 @@
+                I.cancelCraft(job.item)
+            end
+            S.craftJobs[key] = job
+        end
+    end
+
+    local function scheduleCraft(batch, amount)
+        amount = math.min(math.max(1, math.floor(amount)), C.processing.maxCraftPerBatch)
+        local key = jobKey(batch.item)
+        local existing = S.craftJobs[key]
+        if existing and (existing.status == "CRAFTING" or existing.status == "CALCULATING" or existing.status == "WAIT_CPU" or existing.status == "QUEUED") then
+            return true, existing.status
+        end
+        if existing and existing.nextRetry and existing.nextRetry > U.now() then return false, "retry in " .. U.formatDuration(existing.nextRetry - U.now()) end
+        if I.isCrafting(batch.item) then
+            S.craftJobs[key] = {
+                item = batch.item, displayName = batch.displayName, amount = amount,
+                status = "CRAFTING", attempts = existing and existing.attempts or 0,
+                startedAt = existing and existing.startedAt or U.now(), updatedAt = U.now(), external = true
+            }
+            return true, "already crafting"
+        end
+
+        local totalCPUs, busyCPUs, availableCPUs = I.cpuStatus()
+        if totalCPUs > 0 and availableCPUs <= 0 then
+            S.craftJobs[key] = {
+                item = batch.item, displayName = batch.displayName, amount = amount,
+                status = "WAIT_CPU", attempts = existing and existing.attempts or 0,
+                nextRetry = U.now() + 30, createdAt = existing and existing.createdAt or U.now(), updatedAt = U.now(),
+                lastError = "all " .. busyCPUs .. " crafting CPUs are busy"
+            }
+            return false, "all crafting CPUs busy"
+        end
+
+        local craftable, craftableError = I.isCraftable(batch.item)
+        if not craftable then
+            local attempts = (existing and existing.attempts or 0) + 1
+            S.craftJobs[key] = {
+                item = batch.item, displayName = batch.displayName, amount = amount,
+                status = "FAILED", attempts = attempts, nextRetry = U.now() + retryDelay(attempts),
+                createdAt = existing and existing.createdAt or U.now(), updatedAt = U.now(),
+                lastError = craftableError ~= "" and craftableError or "no exact AE2 pattern"
+            }
+            return false, "no exact AE2 crafting pattern"
+        end
+
+        local startCount = I.aeCount(batch.item)
+        local job, err = I.craftItem(batch.item, amount)
+        if not job then
+            local attempts = (existing and existing.attempts or 0) + 1
+            local errorText = err ~= "" and err or "craft request rejected"
+            S.craftJobs[key] = {
+                item = batch.item, displayName = batch.displayName, amount = amount,
+                status = U.contains(errorText, "MISSING") and "MISSING_ITEMS" or "FAILED",
+                attempts = attempts, nextRetry = U.now() + retryDelay(attempts),
+                createdAt = existing and existing.createdAt or U.now(), updatedAt = U.now(), lastError = errorText
+            }
+            return false, errorText
+        end
+
+        S.craftJobs[key] = {
+            item = batch.item,
+            displayName = batch.displayName,
+            amount = amount,
+            status = "CALCULATING",
+            attempts = (existing and existing.attempts or 0) + 1,
+            jobId = job.id,
+            startedAt = U.now(),
+            createdAt = existing and existing.createdAt or U.now(),
+            updatedAt = U.now(),
+            startCount = startCount,
+            readyAtCount = startCount + amount,
+            category = batch.category
+        }
+        S.action("Craft queued: " .. amount .. "x " .. batch.displayName, colors.yellow, true)
+        return true, "craft queued"
+    end
+
+    local function allocateSent(batch, moved, destinations)
+        local left = moved
+        for _, request in ipairs(batch.members) do
+            if left <= 0 then break end
+            local allocation = math.min(left, request.remaining)
+            if allocation > 0 then
+                local record = S.ledger[request.key] or {}
+                record.inFlight = (record.inFlight or 0) + allocation
+                record.sent = (record.sent or 0) + allocation
+                record.sentAt = U.now()
+                record.updatedAt = U.now()
+                record.status = "SENT"
+                record.destinations = U.deepcopy(destinations)
+                S.ledger[request.key] = record
+                request.inFlight = record.inFlight
+                request.remaining = math.max(0, request.remaining - allocation)
+                request.status = "SENT"
+                S.approvals.once[request.key] = nil
+                S.deliveries[request.key] = {
+                    requestKey = request.key,
+                    item = request.item,
+                    itemKey = request.itemKey,
+                    displayName = request.displayName,
+                    amount = allocation,
+                    destinations = U.deepcopy(destinations),
+                    sentAt = U.now(),
+                    updatedAt = U.now(),
+                    status = "ACTIVE",
+                    source = request.source,
+                    destination = request.destination
+                }
+                left = left - allocation
+            end
+        end
+        S.saveApprovals()
+    end
+
+    local function processBatch(batch)
+        local amount = math.min(batch.amount, C.processing.maxExportPerBatch)
+        local stored = I.aeCount(batch.item)
+        local reserve = reserveFor(batch.item)
+        local available = math.max(0, stored - reserve)
+
+        if C.processing.dryRun then
+            local wouldExport = math.min(amount, available)
+            local wouldCraft = math.max(0, amount - wouldExport)
+            for _, request in ipairs(batch.members) do
+                local record = S.transition(request.key, "SIMULATED", {
+                    simulatedAt = U.now(), wouldExport = wouldExport, wouldCraft = wouldCraft,
+                    dryRun = true
+                })
+                request.status = record.status
+            end
+            S.action("DRY RUN: " .. batch.displayName .. " export " .. wouldExport .. ", craft " .. wouldCraft, colors.lightBlue, true)
+            return
+        end
+
+        local moved, destinations, exportError = 0, {}, nil
+        if available > 0 then
+            moved, destinations, exportError = I.exportItem(batch.item, math.min(amount, available), batch.category, batch.buildingKey)
+            if moved > 0 then
+                allocateSent(batch, moved, destinations)
+                S.sent("Sent " .. moved .. "x " .. batch.displayName .. " -> " .. table.concat((function()
+                    local names = {}
+                    for _, destination in ipairs(destinations) do names[#names + 1] = destination.rack .. "(" .. destination.amount .. ")" end
+                    return names
+                end)(), ", "))
+            end
+        end
+
+        local remaining = math.max(0, amount - moved)
+        if remaining > 0 then
+            local craftOk, craftMessage = scheduleCraft(batch, remaining)
+            for _, request in ipairs(batch.members) do
+                if request.remaining > 0 then
+                    local status
+                    if craftOk then status = "CRAFTING"
+                    elseif exportError and U.contains(exportError, "output") then status = "WAITING_OUTPUT"
+                    elseif U.contains(craftMessage, "CPU") then status = "WAIT_CPU"
+                    elseif U.contains(craftMessage, "pattern") then status = "FAILED"
+                    else status = "WAITING" end
+                    S.transition(request.key, status, { lastError = craftOk and nil or craftMessage, nextRetry = U.now() + 30 })
+                    request.status = status
+                end
+            end
+        end
+    end
+
+    local function cleanupDeliveries()
+        local stale = {}
+        for key, delivery in pairs(S.deliveries) do
+            local record = S.ledger[key]
+            local age = U.now() - (delivery.sentAt or U.now())
+            if record and record.status == "COMPLETED" then
+                delivery.status = "COMPLETED"
+                delivery.updatedAt = U.now()
+                if C.processing.autoReclaimStale then
+                    local reclaimed = 0
+                    for _, destination in ipairs(delivery.destinations or {}) do
+                        if not destination.fallback then
+                            local moved = I.importItem(delivery.item, math.max(0, delivery.amount - reclaimed), destination.rack)
+                            reclaimed = reclaimed + (tonumber(moved) or 0)
+                            if reclaimed >= delivery.amount then break end
+                        end
+                    end
+                    delivery.reclaimed = reclaimed
+                    delivery.status = reclaimed > 0 and "RECLAIMED" or "COMPLETED"
+                end
+            elseif age >= C.processing.deliveryWarningSeconds then
+                delivery.status = "STALE"
+                stale[#stale + 1] = delivery
+            end
+            S.deliveries[key] = delivery
+        end
+        return stale
+    end
+
+    local function buildPending(requests)
+        S.pending, S.pendingOrder = {}, {}
+        for _, request in ipairs(requests) do
+            if request.status == "PENDING" or request.status == "PAUSED" then
+                S.pending[request.key] = request
+                S.pendingOrder[#S.pendingOrder + 1] = request.key
+            end
+        end
+        table.sort(S.pendingOrder, function(a, b)
+            local left, right = S.pending[a], S.pending[b]
+            if left.priority == right.priority then return left.displayName < right.displayName end
+            return left.priority > right.priority
+        end)
+        if S.selectedRequest < 1 then S.selectedRequest = #S.pendingOrder end
+        if S.selectedRequest > #S.pendingOrder then S.selectedRequest = 1 end
+    end
+
+    local function buildAlerts(staleDeliveries)
+        local alerts = {}
+        if not I.bridge then alerts[#alerts + 1] = { priority = 100, text = "ME BRIDGE OFFLINE", color = colors.white, background = colors.red } end
+        if not I.colony and not S.remoteMode then alerts[#alerts + 1] = { priority = 100, text = "COLONY INTEGRATOR OFFLINE", color = colors.white, background = colors.red } end
+        if S.colony.underAttack or S.colony.underRaid then alerts[#alerts + 1] = { priority = 120, text = "COLONY UNDER ATTACK", color = colors.white, background = colors.red } end
+        if (S.health.rackPercent or 0) >= C.warehouse.criticalPercent then alerts[#alerts + 1] = { priority = 95, text = "WAREHOUSE CRITICAL " .. math.floor(S.health.rackPercent * 100) .. "%", color = colors.white, background = colors.red } end
+        if #S.racks == 0 then alerts[#alerts + 1] = { priority = 90, text = "NO WAREHOUSE RACKS DETECTED", color = colors.black, background = colors.orange } end
+        if (S.health.craftingCPUs or 0) > 0 and (S.health.craftingAvailable or 0) == 0 then alerts[#alerts + 1] = { priority = 65, text = "ALL AE2 CRAFTING CPUs BUSY", color = colors.black, background = colors.orange } end
