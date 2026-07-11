@@ -1,0 +1,220 @@
+local function createEngine(U, C, S, I, B)
+    local E = {}
+
+    local TOOL_WORDS = { "sword", "pickaxe", "axe", "shovel", "hoe", "shield", "bow", "crossbow", "trident", "shears", "fishing rod" }
+    local ARMOR_WORDS = { "helmet", "chestplate", "leggings", "boots", "armor" }
+    local FOOD_WORDS = { "bread", "apple", "carrot", "potato", "beef", "pork", "chicken", "mutton", "rabbit", "cod", "salmon", "stew", "soup", "berries", "cookie", "melon", "pumpkin pie", "golden carrot", "food" }
+    local FUEL_WORDS = { "coal", "charcoal", "fuel", "lava bucket" }
+    local DECORATIVE_WORDS = { "framed", "domum", "ornamentum", "architect", "shingle", "timber frame", "paper extra" }
+    local SPECIAL_WORDS = { "of class", "minimum level", "maximum level", "repair", "rallying banner", "guard tool", "crafter", "compostable", "fertilizer", "flowers", "smeltable ore", "stack list" }
+
+    local function categoryFor(request)
+        local name = U.lower(request.displayName or U.itemDisplay(request.item))
+        local text = name .. " " .. U.lower(request.description) .. " " .. U.lower(request.destination)
+        if U.containsAny(name, DECORATIVE_WORDS) then return "BUILD" end
+        if U.containsAny(name, ARMOR_WORDS) then return "ARMOR" end
+        if U.containsAny(name, TOOL_WORDS) then return "TOOL" end
+        if U.containsAny(name, FOOD_WORDS) then return "FOOD" end
+        if U.containsAny(text, FUEL_WORDS) then return "FUEL" end
+        if U.containsAny(text, SPECIAL_WORDS) then return "SPECIAL" end
+        if request.source == "WORK_ORDER" then return "BUILD" end
+        if U.contains(text, "builder") or U.contains(text, "building") or U.contains(text, "construction") then return "BUILD" end
+        return "OTHER"
+    end
+
+    local function buildingKeyFor(value)
+        local clean = U.cleanBuilding(value)
+        return U.lower(clean):gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+    end
+
+    local function chooseAlternative(alternatives)
+        local ranked = {}
+        for index, item in ipairs(alternatives or {}) do
+            if type(item) == "table" and U.itemName(item) ~= "" and U.itemName(item) ~= "minecraft:air" then
+                local stored = I.aeCount(item)
+                local craftable = false
+                if stored <= 0 then craftable = I.isCraftable(item) end
+                ranked[#ranked + 1] = { item = item, stored = stored, craftable = craftable, index = index }
+            end
+        end
+        table.sort(ranked, function(a, b)
+            if (a.stored > 0) ~= (b.stored > 0) then return a.stored > 0 end
+            if a.stored ~= b.stored then return a.stored > b.stored end
+            if a.craftable ~= b.craftable then return a.craftable end
+            return a.index < b.index
+        end)
+        return ranked[1] and ranked[1].item or nil, ranked
+    end
+
+    local function updateObserved(record, observed)
+        record = record or {}
+        local previous = tonumber(record.lastObservedRemaining)
+        local inFlight = tonumber(record.inFlight or 0) or 0
+        if previous and observed < previous and inFlight > 0 then
+            local accepted = previous - observed
+            record.inFlight = math.max(0, inFlight - accepted)
+            record.accepted = (record.accepted or 0) + accepted
+            record.acceptedAt = U.now()
+            if record.status == "SENT" then record.status = "ACCEPTED" end
+        end
+        if record.sentAt and U.now() - record.sentAt > 300 and observed >= (previous or observed) then
+            record.inFlight = 0
+        end
+        record.lastObservedRemaining = observed
+        return record
+    end
+
+    local function requestKey(source, id, item)
+        return source .. ":" .. U.text(id) .. ":" .. U.itemKey(item)
+    end
+
+    local function normalizeGeneralRequest(raw)
+        local alternatives = {}
+        if type(raw.items) == "table" then
+            if #raw.items > 0 then
+                for _, item in ipairs(raw.items) do if type(item) == "table" then alternatives[#alternatives + 1] = item end end
+            elseif U.itemName(raw.items) ~= "" then
+                alternatives[#alternatives + 1] = raw.items
+            end
+        end
+        if type(raw.item) == "table" then alternatives[#alternatives + 1] = raw.item end
+        if #alternatives == 0 then return nil end
+        local selected, ranking = chooseAlternative(alternatives)
+        if not selected then return nil end
+        local amount = math.max(1, math.floor(tonumber(raw.count or raw.amount or raw.minCount or 1) or 1))
+        local destination = U.text(raw.target or raw.requester or "Unknown")
+        local result = {
+            source = "REQUEST",
+            sourceId = raw.id or raw.token or raw.name or U.itemKey(selected),
+            item = U.deepcopy(selected),
+            alternatives = U.deepcopy(alternatives),
+            alternativeRanking = ranking,
+            displayName = selected.displayName or raw.name or U.itemDisplay(selected),
+            description = raw.desc or raw.description or "",
+            destination = destination,
+            buildingKey = buildingKeyFor(destination),
+            observedRemaining = amount,
+            rawAmount = amount,
+            raw = raw,
+            requestState = raw.state
+        }
+        result.category = categoryFor(result)
+        result.key = requestKey(result.source, result.sourceId, result.item)
+        result.itemKey = U.itemKey(result.item)
+        return result
+    end
+
+    local function normalizeWorkResource(workOrder, resource)
+        if type(resource) ~= "table" or type(resource.item) ~= "table" then return nil end
+        local needs = tonumber(resource.needs or resource.amount or 0) or 0
+        local available = tonumber(resource.available or 0) or 0
+        local delivering = tonumber(resource.delivering or 0) or 0
+        local missing = math.max(0, math.floor(needs - available - delivering))
+        local destination = U.text(workOrder.buildingName or workOrder.type or "Builder")
+        local result = {
+            source = "WORK_ORDER",
+            sourceId = workOrder.id,
+            workOrderId = workOrder.id,
+            item = U.deepcopy(resource.item),
+            alternatives = { U.deepcopy(resource.item) },
+            displayName = resource.displayName or U.itemDisplay(resource.item),
+            description = U.text(workOrder.workOrderType or workOrder.type),
+            destination = destination,
+            buildingKey = buildingKeyFor(destination),
+            builder = workOrder.builder,
+            location = workOrder.location,
+            targetLevel = workOrder.targetLevel,
+            workOrderPriority = workOrder.priority,
+            availableAtBuilder = available,
+            delivering = delivering,
+            needs = needs,
+            observedRemaining = missing,
+            rawAmount = missing,
+            statusText = resource.status,
+            raw = resource,
+            workOrder = workOrder
+        }
+        result.category = "BUILD"
+        result.key = requestKey(result.source, result.sourceId, result.item)
+        result.itemKey = U.itemKey(result.item)
+        return result
+    end
+
+    local function priorityFor(request)
+        local priority = C.categoryPriority[request.category] or 50
+        if S.colony.underAttack or S.colony.underRaid then
+            if request.category == "ARMOR" or request.category == "TOOL" then priority = C.categoryPriority.ATTACK end
+            if U.contains(request.destination, "guard") then priority = C.categoryPriority.ATTACK + 5 end
+        end
+        if request.category == "FOOD" then
+            local lowFood = false
+            for _, citizen in ipairs(S.citizens or {}) do
+                if tonumber(citizen.saturation or citizen.food or 99) < 5 then lowFood = true break end
+            end
+            if lowFood then priority = priority + 20 end
+        end
+        if request.source == "WORK_ORDER" then
+            priority = priority + math.max(0, 10 - (tonumber(request.workOrderPriority) or 5))
+        end
+        local rule = S.buildingRules[request.buildingKey]
+        if rule then priority = priority + (tonumber(rule.priorityBoost) or 0) end
+        if S.approvals.urgent[request.key] then priority = priority + 100 end
+        return priority
+    end
+
+    local function policyFor(request)
+        local now = U.now()
+        if C.processing.paused then return false, "PAUSED" end
+        if S.approvals.blocked[request.itemKey] or S.approvals.blocked[U.itemName(request.item)] then return false, "BLOCKED" end
+        if S.approvals.deniedUntil[request.key] and S.approvals.deniedUntil[request.key] > now then return false, "DENIED" end
+        if S.approvals.once[request.key] then return true, "APPROVED_ONCE" end
+        if S.approvals.always[request.itemKey] or S.approvals.always[U.itemName(request.item)] then return true, "ALWAYS" end
+
+        local mode = C.modes[request.category] or "APPROVAL"
+        local rule = S.buildingRules[request.buildingKey]
+        if rule and rule.mode and rule.mode ~= "INHERIT" then mode = rule.mode end
+        if C.processing.globalMode == "APPROVAL" then mode = "APPROVAL" end
+        if C.processing.globalMode == "WHITELIST" then mode = "APPROVAL" end
+        if C.processing.globalMode == "OFF" then mode = "OFF" end
+        if mode == "AUTO" then return true, "AUTO" end
+        if mode == "OFF" then return false, "OFF" end
+        return false, "APPROVAL"
+    end
+
+    local function collectWorkOrders()
+        local normalized, activeOrders = {}, {}
+        if not C.processing.useWorkOrderResources then return normalized, activeOrders end
+        local orders, err = I.getWorkOrders()
+        if err then S.diagnostic("Work order read: " .. err) end
+        for _, order in pairs(orders or {}) do
+            if type(order) == "table" and order.id ~= nil then
+                activeOrders[#activeOrders + 1] = order
+                local resources, resourceError = I.getWorkOrderResources(order.id)
+                if resourceError and resourceError ~= "" and resourceError ~= "unsupported" then
+                    S.diagnostic("Work order " .. U.text(order.id) .. " resources: " .. resourceError)
+                end
+                for _, resource in pairs(resources or {}) do
+                    local request = normalizeWorkResource(order, resource)
+                    if request then normalized[#normalized + 1] = request end
+                end
+            end
+        end
+        return normalized, activeOrders
+    end
+
+    local function collectGeneral()
+        local normalized = {}
+        if not C.processing.useGeneralRequests then return normalized end
+        local requests, err = I.getRequests()
+        if err then S.diagnostic("Request read: " .. err) end
+        for _, raw in pairs(requests or {}) do
+            local request = normalizeGeneralRequest(raw)
+            if request then normalized[#normalized + 1] = request end
+        end
+        return normalized
+    end
+
+    local function dedupeRequests(workRequests, generalRequests)
+        local result = {}
+        local workByItem = {}
+        for _, request in ipairs(workRequests) do
