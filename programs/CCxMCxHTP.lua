@@ -3,17 +3,29 @@
 -- Installs verified version 2.1.0
 
 local VERSION = "2.1.0"
-local PART_COUNT = 10
 local EXPECTED_SIZE = 84156
 local EXPECTED_ADLER32 = 978141490
 local BASE_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/main/.htp_patch_v210/"
 
+-- The three larger encoded sections are split into smaller verified files.
+local PART_FILES = {
+    "part00_0.txt", "part00_1.txt", "part00_2.txt",
+    "part01.txt",
+    "part02_0.txt", "part02_1.txt", "part02_2.txt",
+    "part03.txt",
+    "part04_0.txt", "part04_1.txt", "part04_2.txt",
+    "part05.txt", "part06.txt", "part07.txt", "part08.txt", "part09.txt"
+}
+
 local function fail(message)
     term.setTextColor(colors.red)
+    print("")
     print("HTP v" .. VERSION .. " install failed:")
     print(tostring(message))
     term.setTextColor(colors.white)
-    print("Your current installer was not replaced. Reboot or run startup to retry.")
+    print("")
+    print("The verified program was not installed.")
+    print("Run startup again to retry.")
     error(message, 0)
 end
 
@@ -36,9 +48,9 @@ local function decodeBase64(data)
     data = data:gsub("[^" .. alphabet .. "=]", "")
     local bits = data:gsub(".", function(character)
         if character == "=" then return "" end
-        local value = alphabet:find(character, 1, true)
-        if not value then return "" end
-        value = value - 1
+        local position = alphabet:find(character, 1, true)
+        if not position then return "" end
+        local value = position - 1
         local output = ""
         for bit = 6, 1, -1 do
             output = output .. (value % (2 ^ bit) - value % (2 ^ (bit - 1)) > 0 and "1" or "0")
@@ -50,7 +62,9 @@ local function decodeBase64(data)
         if #byteBits ~= 8 then return "" end
         local value = 0
         for index = 1, 8 do
-            if byteBits:sub(index, index) == "1" then value = value + 2 ^ (8 - index) end
+            if byteBits:sub(index, index) == "1" then
+                value = value + 2 ^ (8 - index)
+            end
         end
         return string.char(value)
     end)
@@ -74,9 +88,8 @@ print("Installing verified v" .. VERSION .. "...")
 print("")
 
 local encodedParts = {}
-for index = 0, PART_COUNT - 1 do
-    local filename = string.format("part%02d.txt", index)
-    write("Downloading " .. filename .. "... ")
+for index, filename in ipairs(PART_FILES) do
+    write("[" .. index .. "/" .. #PART_FILES .. "] " .. filename .. "... ")
     local body, err = download(BASE_URL .. filename)
     if not body then
         print("FAILED")
@@ -89,6 +102,7 @@ end
 print("Assembling program...")
 local decoded = decodeBase64(table.concat(encodedParts))
 if not decoded then fail("Base64 decoding returned no data") end
+
 if #decoded ~= EXPECTED_SIZE then
     fail("Size mismatch: expected " .. EXPECTED_SIZE .. ", got " .. #decoded)
 end
@@ -98,16 +112,19 @@ if checksum ~= EXPECTED_ADLER32 then
     fail("Checksum mismatch: expected " .. EXPECTED_ADLER32 .. ", got " .. checksum)
 end
 
-if not decoded:find("%-%- Version: 2%.1%.0", 1) then
+if not decoded:find("%-%- Version: 2%.1%.0") then
     fail("Version marker is missing")
 end
 
-local compiled, compileError = load(decoded, "@startup.new", "t", _ENV)
-if not compiled then fail("Lua syntax check failed: " .. tostring(compileError)) end
+local compiled, compileError = load(decoded, "@startup.new")
+if not compiled then
+    fail("Lua syntax check failed: " .. tostring(compileError))
+end
 
 local temporary = "startup.new"
 local backup = "startup.v2-backup"
 if fs.exists(temporary) then fs.delete(temporary) end
+
 local file = fs.open(temporary, "wb") or fs.open(temporary, "w")
 if not file then fail("Could not create " .. temporary) end
 file.write(decoded)
@@ -120,8 +137,9 @@ fs.move(temporary, "startup")
 term.setTextColor(colors.lime)
 print("")
 print("HTP Colony Supply v" .. VERSION .. " installed successfully.")
-print("Exact framed variants and multi-rack warehouse output are enabled.")
+print("Exact framed variants: ENABLED")
+print("Multi-rack warehouse output: ENABLED")
 term.setTextColor(colors.white)
-print("Rebooting...")
+print("Rebooting into the full program...")
 sleep(2)
 os.reboot()
