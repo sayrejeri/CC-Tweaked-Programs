@@ -1,0 +1,196 @@
+        if #staleDeliveries > 0 then alerts[#alerts + 1] = { priority = 70, text = #staleDeliveries .. " STALE DELIVERIES", color = colors.black, background = colors.orange } end
+        if #S.pendingOrder > 0 then alerts[#alerts + 1] = { priority = 50, text = #S.pendingOrder .. " REQUESTS NEED APPROVAL", color = colors.black, background = colors.yellow } end
+        if C.processing.paused then alerts[#alerts + 1] = { priority = 60, text = "AUTO SUPPLY PAUSED", color = colors.black, background = colors.orange } end
+        if C.processing.dryRun then alerts[#alerts + 1] = { priority = 55, text = "DRY RUN MODE", color = colors.black, background = colors.lightBlue } end
+        if #alerts == 0 then alerts[1] = { priority = 1, text = "COLONY SAFE | AE2 OK | RACKS " .. #S.racks, color = colors.black, background = colors.lime } end
+        table.sort(alerts, function(a, b) return a.priority > b.priority end)
+        S.alerts = alerts
+    end
+
+    local function adaptiveInterval(requests)
+        local active, pending = false, false
+        for _, request in ipairs(requests) do
+            if request.status == "PENDING" or request.status == "PAUSED" then pending = true end
+            if request.status == "QUEUED" or request.status == "CRAFTING" or request.status == "READY" or request.status == "SENT" or request.status == "ACCEPTED" or request.status == "WAIT_CPU" then active = true end
+        end
+        for _, job in pairs(S.craftJobs) do
+            if job.status == "CRAFTING" or job.status == "CALCULATING" or job.status == "WAIT_CPU" then active = true end
+        end
+        if active then
+            S.idleScans = 0
+            return C.scan.busy
+        end
+        if pending then
+            S.idleScans = 0
+            return C.scan.pending
+        end
+        S.idleScans = S.idleScans + 1
+        if S.idleScans >= C.scan.deepIdleAfter then return C.scan.deepIdle end
+        if S.idleScans >= 2 then return C.scan.idle end
+        return C.scan.normal
+    end
+
+    function E.scan()
+        S.scans = S.scans + 1
+        S.lastScanAt = U.now()
+        if U.now() - I.lastDetection > 30 then I.detect() end
+        I.collectColonyStatus()
+        S.buildings = I.getBuildings()
+        S.citizens = I.getCitizens()
+        I.healthCheck()
+        updateCraftJobs()
+
+        local workRequests, activeOrders = collectWorkOrders()
+        local generalRequests = collectGeneral()
+        S.workOrders = activeOrders
+        S.workResources = workRequests
+        local requests = dedupeRequests(workRequests, generalRequests)
+        local seen = {}
+        local active = {}
+        for _, request in ipairs(requests) do
+            request = applyLifecycle(request, seen)
+            if request.observedRemaining > 0 then active[#active + 1] = request end
+        end
+        markAbsent(seen)
+
+        local hasRealWork = false
+        for _, request in ipairs(active) do if request.remaining > 0 and request.status ~= "PENDING" and request.status ~= "PAUSED" then hasRealWork = true break end end
+        local stockRequests = buildStockRequests(hasRealWork)
+        for _, request in ipairs(stockRequests) do active[#active + 1] = request end
+
+        S.requests = active
+        buildPending(active)
+        S.batches = buildBatches(active)
+        local limit = math.min(C.processing.maxBatchesPerScan, #S.batches)
+        for index = 1, limit do processBatch(S.batches[index]) end
+
+        local stale = cleanupDeliveries()
+        I.healthCheck()
+        S.recountStats()
+        buildAlerts(stale)
+        B.auto()
+        S.cleanup()
+        S.saveAll()
+
+        S.scanInterval = adaptiveInterval(S.requests)
+        S.nextScanAt = U.now() + S.scanInterval
+        S.forceScan = false
+        S.action("Scan " .. S.scans .. ": " .. #S.requests .. " requests, " .. #S.batches .. " batches, next " .. S.scanInterval .. "s", colors.cyan, false)
+        return true
+    end
+
+    function E.safeScan()
+        local ok, err = pcall(E.scan)
+        if not ok then
+            S.error("Scan failed: " .. U.text(err))
+            S.nextScanAt = U.now() + 15
+            return false, err
+        end
+        return true
+    end
+
+    function E.handleCraftEvent(errorFlag, jobId, message)
+        local matched = nil
+        for key, job in pairs(S.craftJobs) do
+            if tonumber(job.jobId) == tonumber(jobId) then matched = key break end
+        end
+        if not matched then return end
+        local job = S.craftJobs[matched]
+        job.updatedAt = U.now()
+        job.lastMessage = U.text(message)
+        if errorFlag then
+            job.status = U.contains(message, "MISSING_ITEMS") and "MISSING_ITEMS" or "FAILED"
+            job.lastError = U.text(message)
+            job.nextRetry = U.now() + retryDelay(job.attempts or 1)
+        elseif U.contains(message, "JOB_DONE") then
+            job.status = "DONE"
+            job.doneAt = U.now()
+        elseif U.contains(message, "JOB_CANCELED") then
+            job.status = "CANCELLED"
+        elseif U.contains(message, "CRAFTING_STARTED") then
+            job.status = "CRAFTING"
+            job.lastProgressAt = U.now()
+        elseif U.contains(message, "CALCULATION_STARTED") then
+            job.status = "CALCULATING"
+        end
+        S.craftJobs[matched] = job
+        S.forceScan = true
+        S.action("AE2 craft " .. U.text(jobId) .. ": " .. U.text(message), errorFlag and colors.red or colors.yellow, true)
+        S.saveAll()
+    end
+
+    function E.dumpRequest(request)
+        request = request or S.selectedPending() or S.requests[S.selectedRequest]
+        if not request then return false, "no request selected" end
+        local dump = {
+            generatedAt = U.now(),
+            request = request,
+            ledger = S.ledger[request.key],
+            exactFilter = U.itemFilter(request.item, request.remaining or request.observedRemaining or 1),
+            aeItem = I.aeItem(request.item),
+            rackRanking = I.rankRacks(request.item, request.category, request.buildingKey)
+        }
+        local ok, err = U.writeAll(C.files.requestDump, textutils.serialize(dump, { compact = false }))
+        if ok then S.action("Request details dumped to " .. C.files.requestDump, colors.lightBlue, true) end
+        return ok, err
+    end
+
+    function E.snapshot()
+        local requestRows = {}
+        for index = 1, math.min(20, #S.requests) do
+            local request = S.requests[index]
+            requestRows[#requestRows + 1] = {
+                key = request.key,
+                name = request.displayName,
+                amount = request.remaining,
+                status = request.status,
+                category = request.category,
+                destination = request.destination,
+                priority = request.priority
+            }
+        end
+        return {
+            version = C.version,
+            time = U.now(),
+            colony = U.deepcopy(S.colony),
+            health = U.deepcopy(S.health),
+            stats = U.deepcopy(S.stats),
+            requests = requestRows,
+            alerts = U.deepcopy(S.alerts),
+            paused = C.processing.paused,
+            dryRun = C.processing.dryRun,
+            stockEnabled = C.processing.stockEnabled,
+            nextScanAt = S.nextScanAt,
+            lastAction = S.lastAction
+        }
+    end
+
+    function E.handleRemoteCommand(payload)
+        if type(payload) ~= "table" or payload.protocol ~= "HTP_COLONY_V3" or payload.kind ~= "command" then return false end
+        if C.remote.secret ~= "" and payload.secret ~= C.remote.secret then return false end
+        if not C.remote.allowCommands then return false end
+        local command = U.lower(payload.command)
+        local args = payload.arguments or {}
+        if command == "scan" then S.forceScan = true
+        elseif command == "pause" then C.processing.paused = true; C.save()
+        elseif command == "resume" then C.processing.paused = false; C.save(); S.forceScan = true
+        elseif command == "dryrun" then C.processing.dryRun = args.enabled == true; C.save()
+        elseif command == "approve" and args.key then S.approveOnce(args.key)
+        elseif command == "urgent" and args.key then S.toggleUrgent(args.key)
+        else return false end
+        S.action("Remote command: " .. command, colors.lightBlue, true)
+        return true
+    end
+
+    function E.handleRemoteSnapshot(payload)
+        if type(payload) ~= "table" or payload.protocol ~= "HTP_COLONY_V3" or payload.kind ~= "snapshot" then return false end
+        if C.remote.secret ~= "" and payload.secret ~= C.remote.secret then return false end
+        S.remoteSnapshot = payload.data
+        S.remoteLastSeen = U.now()
+        return true
+    end
+
+    return E
+end
+
+return createEngine
