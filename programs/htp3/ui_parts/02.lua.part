@@ -1,0 +1,150 @@
+        writeAt(rightX + 2, 7, "Racks:", colors.yellow); writeAt(rightX + 10, 7, #S.racks, #S.racks > 0 and colors.lime or colors.red)
+        writeAt(rightX + 2, 8, "Warehouse:", colors.yellow); writeAt(rightX + 13, 8, math.floor(percent * 100 + 0.5) .. "%", fullnessColor(percent))
+        writeAt(rightX + 2, 9, "[" .. U.progressBar(percent, barWidth) .. "]", fullnessColor(percent))
+        writeAt(rightX + 2, 10, "Free slots: " .. U.text(S.health.rackFree) .. "/" .. U.text(S.health.rackSlots), colors.white)
+        writeAt(rightX + 2, 11, "CPU: " .. U.text(S.health.craftingAvailable) .. " free / " .. U.text(S.health.craftingCPUs), (S.health.craftingAvailable or 0) > 0 and colors.lime or colors.orange)
+        writeAt(rightX + 2, 12, "Backup: " .. U.trim(B.lastStatus, rightWidth - 12), B.lastVerified and colors.lime or colors.orange)
+
+        local requestY = 15
+        local requestHeight = math.max(5, height - requestY - 5)
+        box(1, requestY, width, requestHeight, "Current Requests / Batches", colors.gray)
+        drawRows(3, requestY + 1, width - 4, requestHeight - 2, requestRows(S.requests), "No open colony requests")
+
+        local footerY = requestY + requestHeight + 1
+        if footerY <= height then
+            writeAt(1, footerY, "Last: " .. U.trim(S.lastAction, width - 7), colors.gray)
+        end
+    end
+
+    local function simplePage(countdown, pageId, title, rows, empty)
+        local width, height = dimensions()
+        clear(); header(countdown)
+        local pageRows, page, pages = pageSlice(pageId, rows, math.max(1, height - 8))
+        box(1, 5, width, height - 4, title .. " | Page " .. page .. "/" .. pages, colors.gray)
+        drawRows(3, 7, width - 4, height - 8, pageRows, empty)
+    end
+
+    local function pendingRows()
+        local rows = {}
+        for index, key in ipairs(S.pendingOrder) do
+            local request = S.pending[key]
+            rows[#rows + 1] = {
+                text = (index == S.selectedRequest and "> " or "  ") .. index .. "/" .. #S.pendingOrder .. " [" .. request.category .. "] " .. request.remaining .. "x " .. request.displayName .. " -> " .. request.destination .. " | " .. request.policy,
+                color = index == S.selectedRequest and colors.yellow or colors.white
+            }
+        end
+        return rows
+    end
+
+    local function workRows()
+        local rows = {}
+        for _, order in ipairs(S.workOrders or {}) do
+            rows[#rows + 1] = { text = "WO #" .. U.text(order.id) .. " | " .. U.cleanBuilding(order.buildingName or order.type) .. " -> L" .. U.text(order.targetLevel) .. " | Priority " .. U.text(order.priority) .. " | " .. (order.isClaimed and "Claimed" or "Unclaimed"), color = order.isClaimed and colors.lime or colors.gray }
+        end
+        for _, request in ipairs(S.workResources or {}) do
+            rows[#rows + 1] = { text = "  " .. request.observedRemaining .. " missing | " .. request.displayName .. " | Available " .. request.availableAtBuilder .. " | Delivering " .. request.delivering .. " | " .. request.destination, color = request.observedRemaining > 0 and colors.yellow or colors.lime }
+        end
+        return rows
+    end
+
+    local function citizenRows()
+        local rows = {}
+        for _, citizen in pairs(S.citizens or {}) do
+            local food = tonumber(citizen.saturation or 0) or 0
+            local health = tonumber(citizen.health or 0) or 0
+            local maxHealth = tonumber(citizen.maxHealth or 0) or 0
+            local color = colors.white
+            if (maxHealth > 0 and health / maxHealth < 0.35) or food < 5 then color = colors.red elseif food < 10 then color = colors.orange end
+            local work = type(citizen.work) == "table" and (citizen.work.name or citizen.work.job or citizen.work.type) or "Unemployed"
+            rows[#rows + 1] = { text = U.text(citizen.name) .. " | " .. U.cleanBuilding(work) .. " | HP " .. U.formatNumber(health) .. "/" .. U.formatNumber(maxHealth) .. " | Food " .. U.formatNumber(food) .. " | Happy " .. U.formatNumber(citizen.happiness) .. " | " .. U.text(citizen.state), color = color }
+        end
+        table.sort(rows, function(a, b) return a.text < b.text end)
+        return rows
+    end
+
+    local function warehouseRows()
+        local rows = {}
+        local percent = S.health.rackPercent or 0
+        rows[#rows + 1] = { text = "Overall [" .. U.progressBar(percent, 30) .. "] " .. math.floor(percent * 100 + 0.5) .. "% | Free " .. U.text(S.health.rackFree) .. "/" .. U.text(S.health.rackSlots) .. " slots", color = fullnessColor(percent) }
+        rows[#rows + 1] = { text = "Capacity checks include empty slots and matching partial stacks. Matching-item racks are preferred.", color = colors.cyan }
+        rows[#rows + 1] = { text = "Rack assignments: ANY / BUILD / FOOD / TOOL / ARMOR / FUEL / SPECIAL / STOCK / BUILDING", color = colors.gray }
+        rows[#rows + 1] = { text = "", color = colors.white }
+        for index, info in ipairs(S.rackStats or {}) do
+            local rule = info.rule or {}
+            rows[#rows + 1] = {
+                text = (index == S.selectedRack and "> " or "  ") .. info.name .. " | [" .. U.progressBar(info.slotPercent, 14) .. "] " .. math.floor(info.slotPercent * 100 + 0.5) .. "% | Free " .. info.free .. "/" .. info.size .. " | Group " .. U.text(rule.group or "ANY") .. (rule.enabled == false and " DISABLED" or ""),
+                color = index == S.selectedRack and colors.yellow or fullnessColor(info.slotPercent)
+            }
+        end
+        return rows
+    end
+
+    local function craftRows()
+        local rows = {}
+        for _, key in ipairs(U.keys(S.craftJobs)) do
+            local job = S.craftJobs[key]
+            rows[#rows + 1] = { text = "[" .. U.text(job.status) .. "] " .. U.text(job.amount) .. "x " .. U.text(job.displayName) .. " | Try " .. U.text(job.attempts) .. (job.lastError and " | " .. U.trim(job.lastError, 50) or ""), color = statusColor(job.status) }
+        end
+        return rows
+    end
+
+    local function stockRows()
+        local rows = {
+            { text = "Stock system: " .. (C.processing.stockEnabled and "ENABLED" or "DISABLED") .. " | Runs " .. (C.processing.stockOnlyWhenIdle and "only while colony is idle" or "alongside requests"), color = C.processing.stockEnabled and colors.lime or colors.gray },
+            { text = "Targets maintain items inside the connected warehouse racks; AE2 reserves are separate.", color = colors.cyan },
+            { text = "", color = colors.white }
+        }
+        local keys = U.keys(S.stockTargets)
+        for index, key in ipairs(keys) do
+            local target = S.stockTargets[key]
+            local current = I.rackItemCount(target.item or { name = key })
+            rows[#rows + 1] = { text = (index == S.selectedStock and "> " or "  ") .. U.text(target.displayName or U.itemDisplay(target.item or key)) .. " | " .. current .. "/" .. U.text(target.target) .. " | Missing " .. math.max(0, (tonumber(target.target) or 0) - current), color = index == S.selectedStock and colors.yellow or (current >= (tonumber(target.target) or 0) and colors.lime or colors.white) }
+        end
+        return rows
+    end
+
+    local function ruleRows()
+        local rows = { { text = "Category modes", color = colors.yellow } }
+        for _, category in ipairs({ "BUILD", "TOOL", "ARMOR", "FOOD", "FUEL", "SPECIAL", "OTHER", "STOCK" }) do
+            rows[#rows + 1] = { text = category .. ": " .. U.text(C.modes[category]) .. " | Priority " .. U.text(C.categoryPriority[category]), color = C.modes[category] == "AUTO" and colors.lime or (C.modes[category] == "OFF" and colors.red or colors.yellow) }
+        end
+        rows[#rows + 1] = { text = "", color = colors.white }
+        rows[#rows + 1] = { text = "Per-building rules", color = colors.yellow }
+        local choices = S.buildingChoices()
+        for index, choice in ipairs(choices) do
+            local rule = S.buildingRules[choice.key] or { mode = "INHERIT", priorityBoost = 0 }
+            rows[#rows + 1] = { text = (index == S.selectedBuilding and "> " or "  ") .. choice.name .. " | Mode " .. U.text(rule.mode or "INHERIT") .. " | Priority " .. string.format("%+d", tonumber(rule.priorityBoost) or 0), color = index == S.selectedBuilding and colors.yellow or colors.white }
+        end
+        return rows
+    end
+
+    local function backupRows()
+        local rows = {}
+        for _, text in ipairs(B.statusRows()) do rows[#rows + 1] = { text = text, color = U.contains(text, "Verified: true") and colors.lime or colors.white } end
+        rows[#rows + 1] = { text = "Restore buttons require a second press within 8 seconds. Program reboots after a successful restore.", color = colors.orange }
+        return rows
+    end
+
+    local function diagnosticRows()
+        local h = S.health or {}
+        local rows = {
+            { text = "ME Bridge: " .. (h.bridge and "Detected" or "Missing") .. " | Connected " .. tostring(h.bridgeConnected) .. " | Online " .. tostring(h.bridgeOnline), color = h.bridgeConnected and h.bridgeOnline and colors.lime or colors.red },
+            { text = "Colony Integrator: " .. (h.colony and "Detected" or "Missing") .. " | In colony " .. tostring(h.colonyInRange), color = h.colonyInRange and colors.lime or colors.red },
+            { text = "Monitors: " .. U.text(h.monitors) .. " | Racks: " .. U.text(h.racks) .. " | Drives: " .. U.text(h.drives) .. " | Modems: " .. U.text(h.modems), color = colors.white },
+            { text = "Crafting CPUs: " .. U.text(h.craftingCPUs) .. " | Busy " .. U.text(h.craftingBusy) .. " | Available " .. U.text(h.craftingAvailable), color = (h.craftingAvailable or 0) > 0 and colors.lime or colors.orange },
+            { text = "Last scan: " .. U.formatDuration(U.now() - (S.lastScanAt or U.now())) .. " ago | Interval " .. S.scanInterval .. "s | Scans " .. S.scans, color = colors.cyan },
+            { text = "Last backup: " .. B.lastStatus, color = B.lastVerified and colors.lime or colors.orange },
+            { text = "Remote: " .. (C.remote.enabled and "Enabled" or "Disabled") .. " | Channel " .. C.remote.channel .. " | Last remote " .. (S.remoteLastSeen > 0 and U.formatDuration(U.now() - S.remoteLastSeen) .. " ago" or "never"), color = colors.white },
+            { text = "Exact filter dump: " .. C.files.requestDump, color = colors.gray },
+            { text = "Last error: " .. U.text(S.lastError or "None"), color = S.lastError and colors.red or colors.lime }
+        }
+        return rows
+    end
+
+    local function settingsRows()
+        return {
+            { text = "Version: " .. C.version, color = colors.lime },
+            { text = "Global Mode: " .. C.processing.globalMode, color = colors.yellow },
+            { text = "Paused: " .. tostring(C.processing.paused), color = C.processing.paused and colors.orange or colors.white },
+            { text = "Dry Run: " .. tostring(C.processing.dryRun), color = C.processing.dryRun and colors.lightBlue or colors.white },
+            { text = "Work-order resources: " .. tostring(C.processing.useWorkOrderResources), color = colors.white },
