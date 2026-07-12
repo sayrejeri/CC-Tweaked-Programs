@@ -78,6 +78,205 @@
         end)
     end
 
+    -- Large-screen responsive control dashboard. Smaller control monitors keep
+    -- the original compact layout above.
+    local drawControlCompact = UI.drawControl
+
+    function UI.drawControl(countdown)
+        if not I.controlMonitor then return end
+        local okSize, monitorWidth, monitorHeight = pcall(function() return I.controlMonitor.object.getSize() end)
+        if not okSize or monitorWidth < 70 or monitorHeight < 30 then
+            return drawControlCompact(countdown)
+        end
+
+        UI.buttons = {}
+        withScreen(I.controlMonitor.object, function()
+            clear()
+            local width, height = dimensions()
+            local screenName = I.controlMonitor.name
+            local warehousePercent = S.health.rackPercent or 0
+            local warehousePercentText = math.floor(warehousePercent * 100 + 0.5) .. "%"
+            local nextScan = math.max(0, math.floor(countdown or 0))
+
+            center(1, "HTP COLONY COMMAND CENTER v" .. C.version, colors.lime)
+            center(2, (S.remoteMode and "REMOTE" or C.processing.globalMode) .. " | Next Scan " .. nextScan .. "s | " .. (C.processing.paused and "PAUSED" or "RUNNING") .. (C.processing.dryRun and " | DRY RUN" or ""), C.processing.paused and colors.orange or colors.cyan)
+            fillAt(1, 3, width, "=", colors.gray)
+
+            local cardGap = 1
+            local cardWidth = math.floor((width - 5 - (cardGap * 3)) / 4)
+            local cardY, cardHeight = 5, 6
+            local cardX = {
+                2,
+                2 + cardWidth + cardGap,
+                2 + (cardWidth + cardGap) * 2,
+                2 + (cardWidth + cardGap) * 3
+            }
+
+            box(cardX[1], cardY, cardWidth, cardHeight, "Colony", (S.colony.underAttack or S.colony.underRaid) and colors.red or colors.gray)
+            writeAt(cardX[1] + 2, cardY + 1, (S.colony.underAttack or S.colony.underRaid) and "UNDER ATTACK" or "SAFE", (S.colony.underAttack or S.colony.underRaid) and colors.red or colors.lime)
+            writeAt(cardX[1] + 2, cardY + 2, "Citizens " .. U.text(S.colony.citizens) .. "/" .. U.text(S.colony.maxCitizens), colors.white)
+            writeAt(cardX[1] + 2, cardY + 3, "Happy " .. U.formatNumber(S.colony.happiness), colors.white)
+            writeAt(cardX[1] + 2, cardY + 4, "Builds " .. U.text(S.colony.constructionSites), colors.white)
+
+            box(cardX[2], cardY, cardWidth, cardHeight, "Requests", #S.pendingOrder > 0 and colors.yellow or colors.gray)
+            writeAt(cardX[2] + 2, cardY + 1, "Open " .. #S.requests, colors.white)
+            writeAt(cardX[2] + 2, cardY + 2, "Pending " .. #S.pendingOrder, #S.pendingOrder > 0 and colors.yellow or colors.lime)
+            writeAt(cardX[2] + 2, cardY + 3, "Batches " .. #S.batches, colors.white)
+            writeAt(cardX[2] + 2, cardY + 4, "Crafting " .. U.text(S.stats.crafting or 0), colors.cyan)
+
+            box(cardX[3], cardY, cardWidth, cardHeight, "Warehouse", fullnessColor(warehousePercent))
+            writeAt(cardX[3] + 2, cardY + 1, "[" .. U.progressBar(warehousePercent, math.max(6, cardWidth - 11)) .. "] " .. warehousePercentText, fullnessColor(warehousePercent))
+            writeAt(cardX[3] + 2, cardY + 2, "Racks " .. #S.racks, #S.racks > 0 and colors.lime or colors.red)
+            writeAt(cardX[3] + 2, cardY + 3, "Free " .. U.text(S.health.rackFree) .. "/" .. U.text(S.health.rackSlots), colors.white)
+            writeAt(cardX[3] + 2, cardY + 4, "Capacity " .. U.formatNumber(S.health.rackCapacity), colors.white)
+
+            box(cardX[4], cardY, cardWidth, cardHeight, "System", colors.gray)
+            writeAt(cardX[4] + 2, cardY + 1, "AE2 CPU " .. U.text(S.health.craftingAvailable) .. "/" .. U.text(S.health.craftingCPUs), (S.health.craftingAvailable or 0) > 0 and colors.lime or colors.orange)
+            writeAt(cardX[4] + 2, cardY + 2, "Backup " .. (B.lastVerified and "VERIFIED" or "CHECK"), B.lastVerified and colors.lime or colors.orange)
+            writeAt(cardX[4] + 2, cardY + 3, "Scan #" .. U.text(S.scans), colors.white)
+            writeAt(cardX[4] + 2, cardY + 4, "Interval " .. U.text(S.scanInterval) .. "s", colors.cyan)
+
+            local navItems = {
+                { "DASHBOARD", "DASH" }, { "REQUESTS", "REQUESTS" }, { "PENDING", "PENDING" }, { "BUILD", "BUILD" }, { "CITIZENS", "CITIZENS" },
+                { "WAREHOUSE", "WAREHOUSE" }, { "CRAFTS", "CRAFTS" }, { "STOCK", "STOCK" }, { "RULES", "RULES" }, { "BACKUP", "BACKUP" },
+                { "DIAG", "DIAG" }, { "HISTORY", "HISTORY" }, { "ERRORS", "ERRORS" }, { "SENT", "SENT" }, { "SETTINGS", "SETTINGS" }
+            }
+            local navColumns = 5
+            local navGap = 1
+            local navButtonHeight = height >= 38 and 3 or 2
+            local navButtonWidth = math.floor((width - 2 - ((navColumns - 1) * navGap)) / navColumns)
+            local navY = cardY + cardHeight + 1
+            for index, item in ipairs(navItems) do
+                local column = (index - 1) % navColumns
+                local row = math.floor((index - 1) / navColumns)
+                local x = 1 + column * (navButtonWidth + navGap)
+                local y = navY + row * (navButtonHeight + 1)
+                addButton(screenName, x, y, navButtonWidth, navButtonHeight, item[2], function() setPage(item[1]) end, S.page == item[1] and colors.lime or colors.gray)
+            end
+
+            local navRows = math.ceil(#navItems / navColumns)
+            local actionY = navY + navRows * (navButtonHeight + 1)
+            local actionHeight = math.max(8, height - actionY + 1)
+            box(1, actionY, width, actionHeight, "Actions - " .. S.page, colors.gray)
+
+            local function actionGrid(buttons, startY, columns, buttonHeight)
+                columns = columns or 4
+                buttonHeight = buttonHeight or 2
+                local gap = 1
+                local available = width - 4
+                local buttonWidth = math.floor((available - ((columns - 1) * gap)) / columns)
+                for index, button in ipairs(buttons) do
+                    local column = (index - 1) % columns
+                    local row = math.floor((index - 1) / columns)
+                    local x = 3 + column * (buttonWidth + gap)
+                    local y = startY + row * (buttonHeight + 1)
+                    addButton(screenName, x, y, buttonWidth, buttonHeight, button.label, button.action, button.color or colors.gray)
+                end
+                return startY + math.ceil(#buttons / columns) * (buttonHeight + 1)
+            end
+
+            local contentY = actionY + 2
+            local quickY = height - 4
+            local pageButtons = {}
+
+            if S.remoteMode then
+                writeAt(3, contentY, "Remote command center | Last signal " .. (S.remoteLastSeen > 0 and U.formatDuration(U.now() - S.remoteLastSeen) .. " ago" or "never"), colors.cyan)
+                pageButtons = {
+                    { label = "SCAN REMOTE", action = function() I.sendRemoteCommand("scan") end, color = colors.lightBlue },
+                    { label = "PAUSE REMOTE", action = function() I.sendRemoteCommand("pause") end, color = colors.orange },
+                    { label = "RESUME REMOTE", action = function() I.sendRemoteCommand("resume") end, color = colors.lime },
+                    { label = "DRY RUN", action = function() I.sendRemoteCommand("dryrun", { enabled = true }) end, color = colors.lightBlue }
+                }
+                actionGrid(pageButtons, contentY + 2, 4, 2)
+            elseif S.page == "PENDING" then
+                local request = S.selectedPending()
+                writeAt(3, contentY, request and ("Selected " .. S.selectedRequest .. "/" .. #S.pendingOrder .. ": " .. request.remaining .. "x " .. request.displayName .. " -> " .. request.destination) or "No pending approvals", request and colors.yellow or colors.lime)
+                pageButtons = {
+                    { label = "PREVIOUS", action = function() S.selectedRequest = S.selectedRequest - 1; S.selectedPending(); S.saveRuntime() end },
+                    { label = "NEXT", action = function() S.selectedRequest = S.selectedRequest + 1; S.selectedPending(); S.saveRuntime() end },
+                    { label = "APPROVE ONCE", action = function() local r = S.selectedPending(); if r then S.approveOnce(r.key) end end, color = colors.lime },
+                    { label = "ALWAYS ALLOW", action = function() local r = S.selectedPending(); if r then S.approveAlways(r.itemKey) end end, color = colors.green },
+                    { label = "DENY 5 MIN", action = function() local r = S.selectedPending(); if r then S.deny(r.key, 300) end end, color = colors.orange },
+                    { label = "BLOCK ITEM", action = function() local r = S.selectedPending(); if r then S.block(r.itemKey) end end, color = colors.red },
+                    { label = "TOGGLE URGENT", action = function() local r = S.selectedPending(); if r then S.toggleUrgent(r.key) end end, color = colors.purple },
+                    { label = "DUMP EXACT DATA", action = function() E.dumpRequest(S.selectedPending()) end, color = colors.lightBlue }
+                }
+                actionGrid(pageButtons, contentY + 2, 4, 2)
+            elseif S.page == "WAREHOUSE" then
+                local rack = S.selectedRackInfo()
+                writeAt(3, contentY, rack and ("Selected " .. S.selectedRack .. "/" .. #S.rackStats .. ": " .. rack.name .. " | Free " .. rack.free .. "/" .. rack.size .. " | Group " .. U.text((rack.rule or {}).group or "ANY")) or "No warehouse racks detected", rack and colors.yellow or colors.red)
+                pageButtons = {
+                    { label = "PREV RACK", action = function() S.selectedRack = S.selectedRack - 1; S.selectedRackInfo(); S.saveRuntime() end },
+                    { label = "NEXT RACK", action = function() S.selectedRack = S.selectedRack + 1; S.selectedRackInfo(); S.saveRuntime() end },
+                    { label = "TEST SELECTED", action = function() local r = S.selectedRackInfo(); if r then local ok, msg = I.testRack(r.name); S.action(msg, ok and colors.lime or colors.red, true) end end, color = colors.lightBlue },
+                    { label = "CYCLE GROUP", action = cycleRackGroup, color = colors.yellow },
+                    { label = "ENABLE / DISABLE", action = toggleRack, color = colors.orange },
+                    { label = "RESCAN RACKS", action = function() I.detect(); S.forceScan = true end, color = colors.lime }
+                }
+                actionGrid(pageButtons, contentY + 2, 3, 2)
+            elseif S.page == "STOCK" then
+                local stock = S.selectedStockInfo()
+                writeAt(3, contentY, stock and ("Selected target: " .. U.text(stock.displayName) .. " | Keep " .. U.text(stock.target)) or "No stock targets configured", stock and colors.yellow or colors.gray)
+                pageButtons = {
+                    { label = "PREV ITEM", action = function() S.selectedStock = S.selectedStock - 1; S.selectedStockInfo(); S.saveRuntime() end },
+                    { label = "NEXT ITEM", action = function() S.selectedStock = S.selectedStock + 1; S.selectedStockInfo(); S.saveRuntime() end },
+                    { label = "+64 TARGET", action = function() adjustSelectedStock(64) end, color = colors.lime },
+                    { label = "-64 TARGET", action = function() adjustSelectedStock(-64) end, color = colors.orange },
+                    { label = C.processing.stockEnabled and "DISABLE STOCK" or "ENABLE STOCK", action = function() C.toggle("stockEnabled"); S.forceScan = true end, color = C.processing.stockEnabled and colors.red or colors.green }
+                }
+                actionGrid(pageButtons, contentY + 2, 5, 2)
+            elseif S.page == "BACKUP" then
+                writeAt(3, contentY, "Disk: " .. U.text(B.drive or "Not connected") .. " | " .. B.lastStatus, B.lastVerified and colors.lime or colors.orange)
+                pageButtons = {
+                    { label = "BACKUP NOW", action = function() local ok, msg = B.backup(true, "manual"); S.action(msg, ok and colors.lime or colors.red, true) end, color = colors.green },
+                    { label = "RESTORE SETTINGS", action = function() restore("SETTINGS") end, color = colors.orange },
+                    { label = "RESTORE STATE", action = function() restore("STATE") end, color = colors.orange },
+                    { label = "RESTORE LOGS", action = function() restore("LOGS") end, color = colors.orange },
+                    { label = "RESTORE ALL", action = function() restore("ALL") end, color = colors.red }
+                }
+                actionGrid(pageButtons, contentY + 2, 5, 2)
+            elseif S.page == "RULES" then
+                writeAt(3, contentY, "Tap a category to cycle AUTO -> APPROVAL -> OFF", colors.cyan)
+                local categories = { "BUILD", "TOOL", "ARMOR", "FOOD", "FUEL", "SPECIAL", "OTHER", "STOCK" }
+                for _, category in ipairs(categories) do
+                    local currentCategory = category
+                    pageButtons[#pageButtons + 1] = {
+                        label = currentCategory .. ": " .. C.modes[currentCategory],
+                        action = function() C.cycleMode(currentCategory); S.forceScan = true end,
+                        color = C.modes[currentCategory] == "AUTO" and colors.lime or (C.modes[currentCategory] == "OFF" and colors.red or colors.yellow)
+                    }
+                end
+                actionGrid(pageButtons, contentY + 2, 4, 2)
+            else
+                local currentPage = S.pageNumbers[S.page] or 1
+                writeAt(3, contentY, "Current page: " .. S.page .. " | List page " .. currentPage .. " | Last: " .. U.trim(S.lastAction, width - 48), colors.cyan)
+                pageButtons = {
+                    { label = C.processing.paused and "RESUME SYSTEM" or "PAUSE SYSTEM", action = function() C.toggle("paused"); S.forceScan = true end, color = C.processing.paused and colors.lime or colors.orange },
+                    { label = C.processing.dryRun and "DISABLE DRY RUN" or "ENABLE DRY RUN", action = function() C.toggle("dryRun"); S.forceScan = true end, color = C.processing.dryRun and colors.red or colors.lightBlue },
+                    { label = "SCAN NOW", action = function() S.forceScan = true end, color = colors.lime },
+                    { label = "PAGE -", action = function() S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) - 1 end },
+                    { label = "PAGE +", action = function() S.pageNumbers[S.page] = (S.pageNumbers[S.page] or 1) + 1 end },
+                    { label = "BACKUP NOW", action = function() local ok, msg = B.backup(true, "manual"); S.action(msg, ok and colors.lime or colors.red, true) end, color = colors.green },
+                    { label = "UPDATE PROGRAM", action = function() if E.updateProgram then E.updateProgram() end end, color = colors.purple }
+                }
+                actionGrid(pageButtons, contentY + 2, 4, 2)
+            end
+
+            if quickY > contentY + 4 and not S.remoteMode then
+                local quickButtons = {
+                    { label = C.processing.paused and "RESUME" or "PAUSE", action = function() C.toggle("paused"); S.forceScan = true end, color = C.processing.paused and colors.lime or colors.orange },
+                    { label = "SCAN", action = function() S.forceScan = true end, color = colors.lime },
+                    { label = "BACKUP", action = function() local ok, msg = B.backup(true, "manual"); S.action(msg, ok and colors.lime or colors.red, true) end, color = colors.green },
+                    { label = "DASHBOARD", action = function() setPage("DASHBOARD") end, color = colors.lightBlue },
+                    { label = "UPDATE", action = function() if E.updateProgram then E.updateProgram() end end, color = colors.purple }
+                }
+                actionGrid(quickButtons, quickY, 5, 2)
+            end
+
+            writeAt(2, height, "Last: " .. U.trim(S.lastAction, width - 8), colors.gray)
+        end)
+    end
+
     function UI.drawAlert()
         if not I.alertMonitor then return end
         withScreen(I.alertMonitor.object, function()
