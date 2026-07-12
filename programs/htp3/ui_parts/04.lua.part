@@ -147,11 +147,13 @@
             local navButtonWidth = math.floor((width - 2 - ((navColumns - 1) * navGap)) / navColumns)
             local navY = cardY + cardHeight + 1
             for index, item in ipairs(navItems) do
+                local pageId = item[1]
+                local pageLabel = item[2]
                 local column = (index - 1) % navColumns
                 local row = math.floor((index - 1) / navColumns)
                 local x = 1 + column * (navButtonWidth + navGap)
                 local y = navY + row * (navButtonHeight + 1)
-                addButton(screenName, x, y, navButtonWidth, navButtonHeight, item[2], function() setPage(item[1]) end, S.page == item[1] and colors.lime or colors.gray)
+                addButton(screenName, x, y, navButtonWidth, navButtonHeight, pageLabel, function() setPage(pageId) end, S.page == pageId and colors.lime or colors.gray)
             end
 
             local navRows = math.ceil(#navItems / navColumns)
@@ -262,7 +264,7 @@
                 actionGrid(pageButtons, contentY + 2, 4, 2)
             end
 
-            if quickY > contentY + 4 and not S.remoteMode then
+            if height >= 35 and quickY > contentY + 4 and not S.remoteMode then
                 local quickButtons = {
                     { label = C.processing.paused and "RESUME" or "PAUSE", action = function() C.toggle("paused"); S.forceScan = true end, color = C.processing.paused and colors.lime or colors.orange },
                     { label = "SCAN", action = function() S.forceScan = true end, color = colors.lime },
