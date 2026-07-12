@@ -91,7 +91,8 @@ local function download(url)
 end
 
 local function stagedPath(destination)
-    return fs.combine(STAGE, destination:gsub("^/", ""))
+    local cleanDestination = (destination:gsub("^/", ""))
+    return fs.combine(STAGE, cleanDestination)
 end
 
 local function verifyBundle(folder, parts, label)
