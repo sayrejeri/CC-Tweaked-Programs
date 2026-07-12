@@ -1,11 +1,11 @@
 -- startup
--- HackThePlanet Colony Supply v3.0.5 installer and updater
+-- HackThePlanet Colony Supply v3.0.6 installer and recovery updater
 
-local VERSION = "3.0.5"
+local VERSION = "3.0.6"
 local BASE_INSTALLER_COMMIT = "a2687093cf94b30f24c9e8bae7d92dfc53dfeb8c"
-local PATCH_COMMIT = "f351f1feda39683951b25d813341b03f1dd68239"
+local RECOVERY_COMMIT = "7ce676b5c37f740a775e2f99ea087dfe6ec0c366"
 local BASE_INSTALLER_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/" .. BASE_INSTALLER_COMMIT .. "/programs/CCxMCxHTP.lua"
-local PATCH_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/" .. PATCH_COMMIT .. "/programs/htp3/fix_backup_nav_v305.lua"
+local RECOVERY_URL = "https://raw.githubusercontent.com/sayrejeri/CC-Tweaked-Programs/" .. RECOVERY_COMMIT .. "/programs/htp3/recover_v306.lua"
 
 local function setColor(color)
     if term.isColor and term.isColor() then term.setTextColor(color) end
@@ -30,13 +30,13 @@ local function download(url)
     return body
 end
 
-local function runPatch()
-    local body, err = download(PATCH_URL)
-    if not body then fail("Patch download failed: " .. tostring(err)) end
-    local compiled, syntaxError = load(body, "@htp3/fix_backup_nav_v305.lua")
-    if not compiled then fail("Patch syntax error: " .. tostring(syntaxError)) end
+local function runRecovery()
+    local body, err = download(RECOVERY_URL)
+    if not body then fail("Recovery download failed: " .. tostring(err)) end
+    local compiled, syntaxError = load(body, "@htp3/recover_v306.lua")
+    if not compiled then fail("Recovery syntax error: " .. tostring(syntaxError)) end
     local ok, runError = pcall(compiled)
-    if not ok then fail("Patch failed: " .. tostring(runError)) end
+    if not ok then fail("Recovery failed: " .. tostring(runError)) end
 end
 
 term.setBackgroundColor(colors.black)
@@ -44,30 +44,23 @@ setColor(colors.white)
 term.clear()
 term.setCursorPos(1, 1)
 print("HackThePlanet Colony Supply")
-print("Installing backup and navigation fix v" .. VERSION .. "...")
+print("Installing recovery update v" .. VERSION .. "...")
 print("")
 
-if fs.exists("/htp3/main.lua") and fs.exists("/htp3/backup.lua") then
-    runPatch()
-    setColor(colors.lime)
-    print("")
-    print("HTP Colony Supply v" .. VERSION .. " installed.")
-    setColor(colors.white)
-    print("Rebooting...")
-    sleep(2)
-    os.reboot()
+if fs.exists("/htp3/main.lua") then
+    runRecovery()
+    return
 end
 
 print("No existing v3 installation found.")
-print("Installing the verified v3.0.4 base first...")
+print("Installing the verified v3 base first...")
 local installer, installerError = download(BASE_INSTALLER_URL)
 if not installer then fail("Base installer download failed: " .. tostring(installerError)) end
 local compiled, syntaxError = load(installer, "@htp_v304_installer")
 if not compiled then fail("Base installer syntax error: " .. tostring(syntaxError)) end
 
--- Stop the pinned base installer from rebooting before this patch can run.
 local originalReboot = os.reboot
-local rebootMarker = "__HTP_V305_CONTINUE__"
+local rebootMarker = "__HTP_V306_CONTINUE__"
 os.reboot = function() error(rebootMarker, 0) end
 local installOk, installError = pcall(compiled)
 os.reboot = originalReboot
@@ -77,11 +70,5 @@ end
 if not fs.exists("/htp3/main.lua") then fail("Base installer did not create /htp3/main.lua") end
 
 print("")
-print("Applying v3.0.5 backup and navigation patch...")
-runPatch()
-setColor(colors.lime)
-print("HTP Colony Supply v" .. VERSION .. " installed.")
-setColor(colors.white)
-print("Rebooting...")
-sleep(2)
-originalReboot()
+print("Applying v3.0.6 recovery...")
+runRecovery()
