@@ -1,6 +1,6 @@
 local function createConfig(U)
     local C = {
-        version = "3.0.0",
+        version = "3.0.2",
         root = "/htp3",
         dataRoot = "/htp3/data",
         logRoot = "/htp3/logs",
@@ -152,6 +152,7 @@ local function createConfig(U)
 
     function C.load()
         C.ensureFolders()
+        local codeVersion = C.version
         local stored = U.readTable(C.files.config, {})
         if U.tableCount(stored) > 0 then
             local merged = U.merge(C, stored)
@@ -159,6 +160,9 @@ local function createConfig(U)
         else
             C.migrateLegacy()
         end
+        -- The installed code controls the displayed/runtime version. Older
+        -- config.tbl files must not force a stale version number forever.
+        C.version = codeVersion
         C.processing.globalMode = normalizeMode(C.processing.globalMode, "AUTO")
         for category, mode in pairs(C.modes) do C.modes[category] = normalizeMode(mode, "APPROVAL") end
         C.save()
