@@ -81,7 +81,9 @@ local function createBackup(U, C, S, I)
     end
 
     local function safeName(path)
-        return path:gsub("^/", ""):gsub("/", "__")
+        local cleaned = path:gsub("^/", "")
+        cleaned = cleaned:gsub("/", "__")
+        return cleaned
     end
 
     local function manifestPath(folder)
