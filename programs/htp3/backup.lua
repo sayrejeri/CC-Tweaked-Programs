@@ -4,7 +4,7 @@ local function createBackup(U, C, S, I)
         mount = nil,
         label = nil,
         lastAt = 0,
-        lastSnapshotAt = 0,
+        lastSnapshotAt = U.now(),
         lastStatus = "No backup disk",
         lastVerified = false,
         lastFiles = 0,
@@ -45,10 +45,139 @@ local function createBackup(U, C, S, I)
         local result, seen = {}, {}
         for _, group in pairs(fileGroups()) do
             for _, path in ipairs(group) do
-                if not seen[path] then result[#result + 1] = path; seen[path] = true end
+                if not seen[path] then
+                    seen[path] = true
+                    result[#result + 1] = path
+                end
             end
         end
         return result
+    end
+
+    local function backupRoot()
+        return B.mount and fs.combine(B.mount, C.backup.folder) or nil
+    end
+
+    local function safeName(path)
+        local cleaned = path:gsub("^/", "")
+        cleaned = cleaned:gsub("/", "__")
+        return cleaned
+    end
+
+    local function manifestPath(folder)
+        return fs.combine(folder, "manifest.tbl")
+    end
+
+    local function freeSpace(path)
+        local ok, value = pcall(fs.getFreeSpace, path)
+        if ok and type(value) == "number" then return value end
+        return math.huge
+    end
+
+    local function isLog(path)
+        return path == C.files.history
+            or path == C.files.errors
+            or path == C.files.sent
+            or path == C.files.diagnostics
+            or path == C.files.requestDump
+    end
+
+    local function validFolder(folder)
+        if not folder or not fs.exists(folder) or not fs.isDir(folder) then return false end
+        local manifest = U.readTable(manifestPath(folder), nil)
+        return type(manifest) == "table" and type(manifest.files) == "table"
+    end
+
+    local function cleanRoot(root)
+        if not root or not fs.exists(root) then return end
+        for _, name in ipairs(fs.list(root)) do
+            local path = fs.combine(root, name)
+            if name ~= C.backup.autosaveFolder and name ~= "snapshots" then
+                U.safeDelete(path)
+            end
+        end
+
+        local autosave = fs.combine(root, C.backup.autosaveFolder)
+        if fs.exists(autosave) and not validFolder(autosave) then U.safeDelete(autosave) end
+
+        local snapshots = fs.combine(root, "snapshots")
+        if fs.exists(snapshots) then
+            for _, name in ipairs(fs.list(snapshots)) do
+                local folder = fs.combine(snapshots, name)
+                if not validFolder(folder) then U.safeDelete(folder) end
+            end
+        end
+    end
+
+    local function pruneSnapshots(root, keep)
+        local snapshots = fs.combine(root, "snapshots")
+        if not fs.exists(snapshots) then return end
+        local entries = fs.list(snapshots)
+        table.sort(entries)
+        while #entries > keep do
+            U.safeDelete(fs.combine(snapshots, table.remove(entries, 1)))
+        end
+    end
+
+    local function makeCandidates()
+        local result = {}
+        local logCap = math.min(tonumber(C.backup.maxLogBytes) or 2048, 2048)
+        for _, source in ipairs(allFiles()) do
+            if fs.exists(source) and not fs.isDir(source) then
+                local data = U.readAll(source)
+                if data ~= nil then
+                    local logFile = isLog(source)
+                    local originalSize = #data
+                    if logFile and #data > logCap then data = data:sub(#data - logCap + 1) end
+                    result[#result + 1] = {
+                        source = source,
+                        file = safeName(source),
+                        data = data,
+                        logFile = logFile,
+                        truncated = #data < originalSize
+                    }
+                end
+            end
+        end
+        return result
+    end
+
+    local function makeManifest(candidates, reason, snapshot)
+        local manifest = {
+            version = C.version,
+            createdAt = U.now(),
+            reason = reason or (snapshot and "snapshot" or "autosave"),
+            computer = os.getComputerID(),
+            files = {}
+        }
+        for _, candidate in ipairs(candidates) do
+            manifest.files[#manifest.files + 1] = {
+                source = candidate.source,
+                file = candidate.file,
+                size = #candidate.data,
+                checksum = U.adler32(candidate.data),
+                truncated = candidate.truncated == true
+            }
+        end
+        return manifest
+    end
+
+    local function requiredSpace(candidates, manifest)
+        local total = 4096 + (#textutils.serialize(manifest, { compact = true }) * 2)
+        for _, candidate in ipairs(candidates) do total = total + #candidate.data end
+        return total
+    end
+
+    local function verifyFolder(folder)
+        local manifest = U.readTable(manifestPath(folder), nil)
+        if type(manifest) ~= "table" or type(manifest.files) ~= "table" then return false, "manifest missing" end
+        for _, entry in ipairs(manifest.files) do
+            local data = U.readAll(fs.combine(folder, entry.file))
+            if data == nil then return false, "missing " .. U.text(entry.file) end
+            if #data ~= tonumber(entry.size) then return false, "size mismatch " .. U.text(entry.file) end
+            if U.adler32(data) ~= tonumber(entry.checksum) then return false, "checksum mismatch " .. U.text(entry.file) end
+        end
+        return true, "verified " .. #manifest.files .. " files"
     end
 
     function B.detect()
@@ -75,128 +204,96 @@ local function createBackup(U, C, S, I)
         return false
     end
 
-    local function backupRoot()
-        if not B.mount then return nil end
-        return fs.combine(B.mount, C.backup.folder)
-    end
-
-    local function safeName(path)
-        local cleaned = path:gsub("^/", "")
-        cleaned = cleaned:gsub("/", "__")
-        return cleaned
-    end
-
-    local function manifestPath(folder)
-        return fs.combine(folder, "manifest.tbl")
-    end
-
-    local function writeOne(source, destination, maxBytes)
-        local data = U.readAll(source)
-        if data == nil then return nil end
-        if maxBytes and #data > maxBytes then data = data:sub(#data - maxBytes + 1) end
-        local ok, err = U.writeAll(destination, data)
-        if not ok then return false, err end
-        local check = U.readAll(destination)
-        if check == nil then return false, "read-back failed" end
-        return {
-            source = source,
-            file = fs.getName(destination),
-            size = #check,
-            checksum = U.adler32(check)
-        }
-    end
-
-    local function verifyFolder(folder)
-        local manifest = U.readTable(manifestPath(folder), nil)
-        if type(manifest) ~= "table" or type(manifest.files) ~= "table" then return false, "manifest missing" end
-        for _, entry in ipairs(manifest.files) do
-            local path = fs.combine(folder, entry.file)
-            local data = U.readAll(path)
-            if data == nil then return false, "missing " .. entry.file end
-            if #data ~= entry.size then return false, "size mismatch " .. entry.file end
-            if U.adler32(data) ~= entry.checksum then return false, "checksum mismatch " .. entry.file end
-        end
-        return true, "verified " .. #manifest.files .. " files"
-    end
-
-    local function pruneSnapshots(root)
-        local snapshotsRoot = fs.combine(root, "snapshots")
-        if not fs.exists(snapshotsRoot) then return end
-        local entries = fs.list(snapshotsRoot)
-        table.sort(entries)
-        while #entries > C.backup.keepSnapshots do
-            local oldest = table.remove(entries, 1)
-            U.safeDelete(fs.combine(snapshotsRoot, oldest))
-        end
-    end
-
     function B.backup(forceSnapshot, reason)
         if not B.mount and not B.detect() then return false, B.lastStatus end
         local root = backupRoot()
         U.ensureDir(root)
+        cleanRoot(root)
 
-        -- Remove the oversized legacy startup backup left by early versions.
-        local legacy = fs.combine(root, "startup")
-        if fs.exists(legacy) then U.safeDelete(legacy) end
-        local legacyFolder = fs.combine(root, "autosave/startup")
-        if fs.exists(legacyFolder) then U.safeDelete(legacyFolder) end
-
-        local now = U.now()
-        local makeSnapshot = forceSnapshot == true or (now - B.lastSnapshotAt >= C.backup.snapshotInterval)
-        local folder
-        if makeSnapshot then
-            local name = os.date and os.date("!%Y%m%d-%H%M%S") or tostring(now)
-            folder = fs.combine(fs.combine(root, "snapshots"), name)
-            B.lastSnapshotAt = now
+        local snapshot = forceSnapshot == true or (U.now() - B.lastSnapshotAt >= C.backup.snapshotInterval)
+        local target
+        if snapshot then
+            local snapshots = fs.combine(root, "snapshots")
+            U.ensureDir(snapshots)
+            pruneSnapshots(root, math.max(0, math.min(1, (C.backup.keepSnapshots or 1) - 1)))
+            target = fs.combine(snapshots, tostring(U.now()))
         else
-            folder = fs.combine(root, C.backup.autosaveFolder)
-            if fs.exists(folder) then U.safeDelete(folder) end
+            target = fs.combine(root, C.backup.autosaveFolder)
         end
-        U.ensureDir(folder)
+        if fs.exists(target) then U.safeDelete(target) end
 
-        local manifest = {
-            version = C.version,
-            createdAt = now,
-            reason = reason or (makeSnapshot and "snapshot" or "autosave"),
-            computer = os.getComputerID(),
-            files = {}
-        }
+        local candidates = makeCandidates()
+        local manifest = makeManifest(candidates, reason, snapshot)
+        local needed = requiredSpace(candidates, manifest)
 
-        local failures = {}
-        for _, source in ipairs(allFiles()) do
-            if fs.exists(source) and not fs.isDir(source) then
-                local maxBytes = nil
-                if source == C.files.history or source == C.files.errors or source == C.files.sent or source == C.files.diagnostics or source == C.files.requestDump then
-                    maxBytes = C.backup.maxLogBytes
-                end
-                local destination = fs.combine(folder, safeName(source))
-                local entry, err = writeOne(source, destination, maxBytes)
-                if type(entry) == "table" then
-                    manifest.files[#manifest.files + 1] = entry
-                elseif entry == false then
-                    failures[#failures + 1] = source .. ": " .. U.text(err)
+        if freeSpace(root) < needed then
+            local snapshots = fs.combine(root, "snapshots")
+            if fs.exists(snapshots) then
+                local entries = fs.list(snapshots)
+                table.sort(entries)
+                while freeSpace(root) < needed and #entries > 0 do
+                    U.safeDelete(fs.combine(snapshots, table.remove(entries, 1)))
                 end
             end
         end
 
-        local manifestOk, manifestErr = U.writeTable(manifestPath(folder), manifest)
-        if not manifestOk then failures[#failures + 1] = "manifest: " .. U.text(manifestErr) end
-
-        local verified, verifyMessage = verifyFolder(folder)
-        B.lastVerified = verified
-        B.lastAt = now
-        B.lastFiles = #manifest.files
-        if verified and #failures == 0 then
-            B.lastStatus = (makeSnapshot and "Snapshot " or "Backed up ") .. #manifest.files .. " files"
-        elseif verified then
-            B.lastStatus = "Verified " .. #manifest.files .. " files; " .. #failures .. " skipped"
-        else
-            B.lastStatus = "Backup verification failed: " .. verifyMessage
+        while freeSpace(root) < needed do
+            local removeIndex, largest = nil, -1
+            for index, candidate in ipairs(candidates) do
+                if candidate.logFile and #candidate.data > largest then
+                    removeIndex, largest = index, #candidate.data
+                end
+            end
+            if not removeIndex then break end
+            table.remove(candidates, removeIndex)
+            manifest = makeManifest(candidates, reason, snapshot)
+            needed = requiredSpace(candidates, manifest)
         end
 
-        if makeSnapshot then pruneSnapshots(root) end
+        local available = freeSpace(root)
+        if available < needed then
+            B.lastVerified = false
+            B.lastAt = U.now()
+            B.lastStatus = "Backup failed: need " .. needed .. " bytes, only " .. available .. " free"
+            S.lastBackup = B.lastStatus
+            S.diagnostic(B.lastStatus)
+            return false, B.lastStatus
+        end
+
+        U.ensureDir(target)
+        local okManifest, manifestError = U.writeTable(manifestPath(target), manifest)
+        if not okManifest then
+            U.safeDelete(target)
+            B.lastStatus = "Backup failed writing manifest: " .. U.text(manifestError)
+            B.lastVerified = false
+            B.lastAt = U.now()
+            return false, B.lastStatus
+        end
+
+        for _, candidate in ipairs(candidates) do
+            local ok, err = U.writeAll(fs.combine(target, candidate.file), candidate.data)
+            if not ok then
+                U.safeDelete(target)
+                B.lastStatus = "Backup failed writing " .. candidate.file .. ": " .. U.text(err)
+                B.lastVerified = false
+                B.lastAt = U.now()
+                S.diagnostic(B.lastStatus)
+                return false, B.lastStatus
+            end
+        end
+
+        local verified, message = verifyFolder(target)
+        if not verified then U.safeDelete(target) end
+        B.lastVerified = verified
+        B.lastAt = U.now()
+        B.lastFiles = #manifest.files
+        if verified then
+            if snapshot then B.lastSnapshotAt = U.now() end
+            B.lastStatus = (snapshot and "Snapshot " or "Backed up ") .. #manifest.files .. " files"
+        else
+            B.lastStatus = "Backup verification failed: " .. message
+        end
         S.lastBackup = B.lastStatus
-        if #failures > 0 then S.diagnostic("Backup skipped: " .. table.concat(failures, " | ")) end
         return verified, B.lastStatus
     end
 
@@ -205,35 +302,36 @@ local function createBackup(U, C, S, I)
         return B.backup(false, "automatic")
     end
 
-    function B.latestFolder()
-        if not B.mount and not B.detect() then return nil end
-        local root = backupRoot()
-        local snapshotsRoot = fs.combine(root, "snapshots")
-        if fs.exists(snapshotsRoot) then
-            local entries = fs.list(snapshotsRoot)
-            table.sort(entries)
-            if #entries > 0 then return fs.combine(snapshotsRoot, entries[#entries]) end
-        end
-        local autosave = fs.combine(root, C.backup.autosaveFolder)
-        if fs.exists(autosave) then return autosave end
-        return nil
-    end
-
     function B.listSnapshots()
         if not B.mount and not B.detect() then return {} end
         local root = backupRoot()
-        local snapshotsRoot = fs.combine(root, "snapshots")
+        cleanRoot(root)
+        local snapshots = fs.combine(root, "snapshots")
         local result = {}
-        if fs.exists(snapshotsRoot) then
-            local entries = fs.list(snapshotsRoot)
+        if fs.exists(snapshots) then
+            local entries = fs.list(snapshots)
             table.sort(entries, function(a, b) return a > b end)
             for _, name in ipairs(entries) do
-                local folder = fs.combine(snapshotsRoot, name)
-                local manifest = U.readTable(manifestPath(folder), {})
-                result[#result + 1] = { name = name, folder = folder, manifest = manifest }
+                local folder = fs.combine(snapshots, name)
+                if validFolder(folder) then
+                    result[#result + 1] = {
+                        name = name,
+                        folder = folder,
+                        manifest = U.readTable(manifestPath(folder), {})
+                    }
+                end
             end
         end
         return result
+    end
+
+    function B.latestFolder()
+        local snapshots = B.listSnapshots()
+        if #snapshots > 0 then return snapshots[1].folder end
+        if not B.mount and not B.detect() then return nil end
+        local autosave = fs.combine(backupRoot(), C.backup.autosaveFolder)
+        if validFolder(autosave) then return autosave end
+        return nil
     end
 
     local function allowedSources(mode)
@@ -244,22 +342,22 @@ local function createBackup(U, C, S, I)
 
     function B.restore(mode, folder)
         folder = folder or B.latestFolder()
-        if not folder then return false, "no backup found" end
-        local verified, verifyMessage = verifyFolder(folder)
-        if not verified then return false, "backup is not valid: " .. verifyMessage end
+        if not folder then return false, "no valid backup found" end
+        local verified, message = verifyFolder(folder)
+        if not verified then return false, "backup invalid: " .. message end
         local manifest = U.readTable(manifestPath(folder), {})
-        local bySource = {}
-        for _, entry in ipairs(manifest.files or {}) do bySource[entry.source] = entry end
-        local restored, failed = 0, {}
+        local entries = {}
+        for _, entry in ipairs(manifest.files or {}) do entries[entry.source] = entry end
+
+        local restored, failures = 0, {}
         for _, source in ipairs(allowedSources(mode)) do
-            local entry = bySource[source]
+            local entry = entries[source]
             if entry then
-                local backupFile = fs.combine(folder, entry.file)
-                local ok, err = U.copyFile(backupFile, source)
-                if ok then restored = restored + 1 else failed[#failed + 1] = source .. ": " .. U.text(err) end
+                local ok, err = U.copyFile(fs.combine(folder, entry.file), source)
+                if ok then restored = restored + 1 else failures[#failures + 1] = source .. ": " .. U.text(err) end
             end
         end
-        if #failed > 0 then return false, "restored " .. restored .. "; failed " .. #failed end
+        if #failures > 0 then return false, "restored " .. restored .. "; failed " .. #failures end
         B.lastStatus = "Restored " .. restored .. " " .. string.upper(mode or "ALL") .. " files"
         S.lastBackup = B.lastStatus
         return true, B.lastStatus
@@ -271,8 +369,7 @@ local function createBackup(U, C, S, I)
             B.pendingRestore, B.pendingRestoreAt = nil, 0
             return B.restore(mode)
         end
-        B.pendingRestore = mode
-        B.pendingRestoreAt = now
+        B.pendingRestore, B.pendingRestoreAt = mode, now
         return false, "Press restore " .. mode .. " again within 8s to confirm"
     end
 
